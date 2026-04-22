@@ -1,0 +1,44 @@
+{
+  "Test_Exon_Truncation": [
+    {
+      "name": "intron_upstream_const",
+      "length": 5,
+      "type": "intron",
+      "start": 0,
+      "end": 5,
+      "mutations": []
+    },
+    {
+      "name": "intron_upstream",
+      "type": "intron",
+      "length": 5,
+      "start": 5,
+      "end": 10,
+      "mutations": ["SNP", "DEL", "INS"]
+    },
+    {
+      "name": "exon_test",
+      "type": "exon",
+      "start": 10,
+      "end": 20,
+      "length": 10,
+      "mutations": ["AA", "SNP", "INS", "DEL"]
+    },
+    {
+      "name": "intron_downstream",
+      "type": "intron",
+      "start": 20,
+      "end": 25,
+      "length": 5,
+      "mutations": ["SNP", "DEL", "INS"]
+    },
+        {
+      "name": "intron_downstream_const",
+      "type": "intron",
+      "start": 25,
+      "end": 30,
+      "length": 5,
+      "mutations": []
+    }
+  ]
+}

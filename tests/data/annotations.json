@@ -1,0 +1,10 @@
+{
+  "Test_Exon_Truncation": {
+    "chromosome": "17",
+    "strand": "+",
+    "genomic_start": 10000,
+    "assembly": "GRCh38",
+    "transcript_ensembl_id": "ENST00000269305",
+    "genomic_id": "NM_000546.6"
+  }
+}
