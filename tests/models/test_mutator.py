@@ -195,7 +195,7 @@ def test_insertions(mutations, annotations, sample, regions, mutator):
     for _, row in insertions.iterrows():
         pos = row["mutation_pos"]
         alt = row["alt"]
-        seq = row["seq"]
+        seq = row["coding"]
 
         assert (
             seq[pos : pos + len(alt)] == alt
@@ -294,7 +294,7 @@ def test_deletions(mutations, annotations, sample):
     for _, row in deletions.iterrows():
         pos = row["mutation_pos"]
         ref = row["ref"]
-        seq = row["seq"]
+        seq = row["coding"]
         # deleted segment must NOT be present anymore
         seq_stripped = sample.seq[:pos] + sample.seq[pos + len(ref) :]
         deleted = sample.seq[pos : pos + len(ref)]
@@ -306,7 +306,7 @@ def test_deletions(mutations, annotations, sample):
             deleted == ref
         ), f"Deleted sequence should be {ref}, was {deleted}"
         # ensure sequence length consistency
-        assert len(seq) == len(mutations["seq"].iloc[0]) - len(
+        assert len(seq) == len(mutations["coding"].iloc[0]) - len(
             ref
         ), f"Length mismatch after deletion {ref}"
 
@@ -346,7 +346,7 @@ def test_snps(mutations, annotations, sample):
         pos = row["mutation_pos"]
         ref = row["ref"]
         alt = row["alt"]
-        seq = row["seq"]
+        seq = row["coding"]
 
         assert ref != alt, f"Ref and alt identical in {row}"
 
@@ -444,7 +444,7 @@ def test_amino_acid_mutations(mutations, annotations, sample):
                     amino_acid in group["alt_aa"].unique()
                 ), f"{amino_acid} codon expected at pos {codon_pos}"
 
-    for seq in aa["seq"].unique():
+    for seq in aa["coding"].unique():
         assert (
             seq[:10] == sample.seq[:10]
         ), f"First 10 bases should be unchanged in {seq}"
@@ -487,5 +487,5 @@ def test_all_mutations_semantic(mutations):
 def test_deduplication(mutations, mutator):
     mutations.to_csv("test.tsv", sep="\t")
     assert mutations.shape[0] == 1939
-    dedup = mutator.consolidate(mutations)
+    dedup = mutator.deduplicate(mutations)
     assert dedup.shape[0] == 1471

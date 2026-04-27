@@ -94,7 +94,7 @@ class VariantG:
     def genomic_start_1(self) -> int:
         g_start_1 = self.start
         if self.edit_type == "ins":
-            g_start_1 = self.end if self.end else g_start_1 + 1
+            g_start_1 = self.end if self.end else g_start_1
         return g_start_1
 
     @cached_property
@@ -103,7 +103,6 @@ class VariantG:
         pos = self.var.posedit.pos
 
         if self.edit_type == "delins":
-            print("CHECK DELINS")
             return self.end - self.start + 1
         # 1. Deletion (del)
         if isinstance(edit, hgvs.edit.NARefAlt) and edit.ref and not edit.alt:
@@ -252,6 +251,11 @@ class HGVSVariantGenerator:
         self.assembly = assembly
         self.cds = cds
         self.genomic_flanks = genomic_flanks
+        if self.genomic_flanks:
+            print(
+                "Check your coordinates with Ensembl Genome Browser! Genomic flanks are set to",
+                self.genomic_flanks,
+            )
         # self.transcript_ac = transcript_ac
         # self.chrom_ac = chrom_ac
         self.flanking = flanking
@@ -312,7 +316,7 @@ class HGVSVariantGenerator:
 
     def _genomic_pos_to_local_0(self, g_pos_1based: int) -> int:
         """Konvertiert 1-based chromosomale Position → 0-based Index in genomic_seq."""
-        return g_pos_1based - self.gene_start_1
+        return g_pos_1based - self.gene_start_1 + 1
 
     def _c_pos_to_cds_0(self, c_pos_1based: int) -> int:
         """Konvertiert 1-based c.-Position → 0-based Index in cds_seq."""
@@ -402,7 +406,12 @@ class HGVSVariantGenerator:
         #     hgvs_or_mutalyzer_c_str, translate_to="c"
         # )
         print("input", hgvs_or_mutalyzer_c_str)
-        normalized = Mutalyzer.normalize(hgvs_or_mutalyzer_c_str)
+        try:
+            normalized = Mutalyzer.normalize(hgvs_or_mutalyzer_c_str)
+        except ValueError as e:
+            print("input", hgvs_or_mutalyzer_c_str)
+            print(f"Error normalizing HGVS: {e}")
+            raise
         print("mutalyzer", normalized)
         hgvs_compliant = Mutalyzer.mutalyzer_to_hgvs(normalized)
         print("compliant", hgvs_compliant)
@@ -456,8 +465,8 @@ class HGVSVariantGenerator:
         # var_g = self.am.c_to_g(var_c)  # , alt_ac=transcript)
         # var_p = self._safe_c_to_p(var_c)
         return self._build_mutation(
-            var_c=var_c,
             var_g=var_g,
+            var_c=var_c,
             # var_p=var_p,
             # var_r=var_r,
             normalized=normalized,
@@ -518,17 +527,17 @@ class HGVSVariantGenerator:
             frag_start, frag_end = min(frag_start, frag_end), max(
                 frag_start, frag_end
             )
-            print(
-                flank_left,
-                flank_right,
-                frag_start,
-                frag_end,
-                local_pos_0,
-                genomic_pos_1,
-            )
+            # print(
+            #     flank_left,
+            #     flank_right,
+            #     frag_start,
+            #     frag_end,
+            #     local_pos_0,
+            #     genomic_pos_1,
+            # )
             fragment = self.genomic.seq[frag_start:frag_end]
             print("Fragment", fragment)
-            local_in_frag = local_pos_0 - frag_start
+            local_in_frag = local_pos_0 - frag_start - 1
         else:
             fragment = self.genomic.seq
             local_in_frag = local_pos_0
@@ -578,6 +587,7 @@ class HGVSVariantGenerator:
                 # DelIns: both ref and alt present, replaces ref_len with alt
                 alt = edit.alt or ""
                 print("ALT", alt)
+                print("This is the generated sequence:", before + alt + after)
                 return before + alt + after
 
             case hgvs.edit.Dup():
@@ -588,13 +598,13 @@ class HGVSVariantGenerator:
             case hgvs.edit.Inv():
                 # g.100_102inv → reverse complement of ref_seq
                 inv_seq = str(Seq(ref_seq).reverse_complement())
-                print("INV of", ref_seq, "->", inv_seq)
+                # print("INV of", ref_seq, "->", inv_seq)
                 return before + inv_seq + after
 
             case hgvs.edit.Repeat():
                 # g.100_102[4] → repeat ref_seq N times
                 count = edit.seq.ref_n  # the repeat count
-                print("REPEAT of", ref_seq, "->", ref_seq * count)
+                # print("REPEAT of", ref_seq, "->", ref_seq * count)
                 return before + (ref_seq * count) + after
 
             case _:

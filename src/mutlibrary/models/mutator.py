@@ -7,6 +7,7 @@ from typing import Any, Literal
 import pandas as pd  # type: ignore[import]
 from Bio import Align, SeqIO  # type: ignore[import]
 from Bio.Data import CodonTable  # type: ignore[import]
+from Bio.Seq import Seq  # type: ignore[import]
 from mmalignments.models.elements import (  # type: ignore[import]
     Element,  # type: ignore[import]
     FileElement,  # type: ignore[import]
@@ -317,10 +318,17 @@ class MultiSeqMutatorHGVS:
 
                     # mutation type
                     mutation_type = "nonsense" if alt_aa == "*" else "missense"
-
+                    genomic_seq = (
+                        mutated_seq
+                        if self.strand == 1
+                        else str(Seq(mutated_seq).reverse_complement())
+                    )
                     mutation = Mutation(
                         seq_id=seq_id,
                         genomic_id=self.genomic_id,
+                        coding=mutated_seq,
+                        genomic=genomic_seq,
+                        refseq=seq,
                         chromosome=self.chromosome,
                         strand=self.strand,
                         mutation_pos=exon_pos,
@@ -329,7 +337,6 @@ class MultiSeqMutatorHGVS:
                         ref=ref,
                         alt=alt,
                         mutation_type=mutation_type,
-                        seq=mutated_seq,
                         cds_pos=cds_pos,
                         ref_codon=codon,
                         alt_codon=alt_codon,
@@ -386,9 +393,17 @@ class MultiSeqMutatorHGVS:
             for alt in self.bases:
                 if alt != ref:
                     mutated_seq = seq[:pos] + alt + seq[pos + 1 :]
+                    genomic = (
+                        mutated_seq
+                        if self.strand == 1
+                        else str(Seq(mutated_seq).reverse_complement())
+                    )
                     mutation = Mutation(
                         seq_id=seq_id,
                         genomic_id=self.genomic_id,
+                        genomic=genomic,
+                        coding=mutated_seq,
+                        refseq=seq,
                         chromosome=self.chromosome,
                         strand=self.strand,
                         region_type=rtype,
@@ -398,7 +413,6 @@ class MultiSeqMutatorHGVS:
                         ref=ref,
                         alt=alt,
                         mutation_type="SNP",
-                        seq=mutated_seq,
                         ref_codon=None,
                         alt_codon=None,
                         ref_aa=None,
@@ -436,10 +450,18 @@ class MultiSeqMutatorHGVS:
                 for ins in itertools.product(self.bases, repeat=length):
                     ins_seq = "".join(ins)
                     mutated_seq = seq[:pos] + ins_seq + seq[pos:]
+                    genomic_seq = (
+                        mutated_seq
+                        if self.strand == 1
+                        else str(Seq(mutated_seq).reverse_complement())
+                    )
                     mutation_type = f"INS_{length}"
                     mutation = Mutation(
                         seq_id=seq_id,
                         genomic_id=self.genomic_id,
+                        coding=mutated_seq,
+                        genomic=genomic_seq,
+                        refseq=seq,
                         chromosome=self.chromosome,
                         strand=self.strand,
                         region_type=rtype,
@@ -449,7 +471,6 @@ class MultiSeqMutatorHGVS:
                         ref="",
                         alt=ins_seq,
                         mutation_type=mutation_type,
-                        seq=mutated_seq,
                         ref_codon=None,
                         alt_codon=None,
                         ref_aa=None,
@@ -495,9 +516,17 @@ class MultiSeqMutatorHGVS:
                 rtype = region_map[pos]["type"]
 
                 mutation_type = f"DEL_{length}"
+                genomic_seq = (
+                    mutated_seq
+                    if self.strand == 1
+                    else str(Seq(mutated_seq).reverse_complement())
+                )
                 mutation = Mutation(
                     seq_id=seq_id,
                     genomic_id=self.genomic_id,
+                    coding=mutated_seq,
+                    genomic=genomic_seq,
+                    refseq=seq,
                     chromosome=self.chromosome,
                     strand=self.strand,
                     region_type=rtype,
@@ -506,7 +535,6 @@ class MultiSeqMutatorHGVS:
                     ref=ref_seq,
                     alt="",
                     mutation_type=mutation_type,
-                    seq=mutated_seq,
                     cds_pos=None,
                     ref_codon=None,
                     alt_codon=None,
@@ -580,7 +608,7 @@ class MultiSeqMutatorHGVS:
             ascending=[True, ascending],
         )
         mutations["is_duplicate"] = mutations.duplicated(
-            subset="seq", keep="first"
+            subset="coding", keep="first"
         )
         return mutations
 
@@ -592,7 +620,7 @@ class MultiSeqMutatorHGVS:
 
     @staticmethod
     def deduplicate(mutations: DataFrame) -> DataFrame:
-        mutations = mutations.drop_duplicates(subset="seq")
+        mutations = mutations[~mutations["is_duplicate"]].copy()
         return mutations
 
     def write_mutations(
@@ -601,7 +629,7 @@ class MultiSeqMutatorHGVS:
         # the subroutine
         df = self.generate_mutations()
         if deduplicate:
-            df = self.consolidate(df)
+            df = self.deduplicate(df)
         df.to_csv(output_file, sep="\t", index=False)
 
 

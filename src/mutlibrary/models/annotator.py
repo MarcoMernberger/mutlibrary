@@ -630,6 +630,7 @@ class Mutalyzer(MutationAnnotator):
             timeout=30,
         )
         if r.status_code != 200:
+            print(url, encoded)
             raise ValueError(f"Mutalyzer error {r.status_code}: {r.text[:200]}")
 
         if not r.text.strip():
