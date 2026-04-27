@@ -43,6 +43,8 @@ def test_annotation():
 
 @pytest.fixture(scope="session")
 def clinvar_cases():
-    return pd.read_csv(
+    df = pd.read_csv(
         Path(__file__).parent / "data" / "test_cases_clinvar.tsv", sep="\t"
     )
+    df = df.where(df.notna(), None)
+    return df

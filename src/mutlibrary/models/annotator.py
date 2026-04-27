@@ -1,5 +1,7 @@
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
+from urllib.parse import quote
 
 import hgvs.assemblymapper  # type: ignore[import]
 import hgvs.dataproviders.uta  # type: ignore[import]
@@ -9,14 +11,20 @@ import hgvs.location  # type: ignore[import]
 import hgvs.parser  # type: ignore[import]
 import hgvs.posedit  # type: ignore[import]
 import hgvs.sequencevariant  # type: ignore[import]
+import requests
 from mavehgvs.variant import Variant as HgvsVariant  # type: ignore[import]
 
 
 @dataclass
 class Mutation:
     seq_id: str  # a name for the sequence
+    # seq: str  # the mutated sequence on coding strand
     genomic_id: str  # the genomic_id for normalized hgvs, e.g. NC_000017.11
+    genomic: str  # the mutated sequence on + strand
+    coding: str  # the mutated sequence on coding strand
+    refseq: str  # the reference sequence with flanking
     chromosome: str
+    strand: int  # +1 or -1
     region_type: str  # intron or exon
     mutation_pos: int  #   the position in the input_sequence
     genomic_pos: int  #   the genomic position of the mutation (1-based)
@@ -24,7 +32,6 @@ class Mutation:
     ref: str  # the reference allele (nucleotide(s) in the input sequence), as in vcf
     alt: str  # the alternate allele (nucleotide(s) in the input sequence), as in vcf
     mutation_type: str  # e.g. "SNV", "Del", "Ins", "MNV", "Delins"
-    seq: str  # the mutated sequence
     ref_codon: (
         str | None
     )  # the reference codon (3 nucleotides in the input sequence), None if non-coding
@@ -45,6 +52,27 @@ class Mutation:
     hgvs_p: str | None = (
         None  # the protein HGVS annotation, e.g. "NP_000537.3:p.Pro72Arg"
     )
+    hgvs_r: str | None = (
+        None  # the RNA HGVS annotation, e.g. "NR_000537.3:r.215C>G"
+    )
+    # hgvs_g_compliant: str | None = (
+    #     None  # the compliant genomic HGVS annotation, e.g. "NC_000017.11:g.7674220A>T"
+    # )
+    # hgvs_c_compliant: str | None = (
+    #     None  # the compliant cDNA HGVS annotation, e.g. "NM_000546.6:c.215C>G"
+    # )
+    # hgvs_p_compliant: str | None = (
+    #     None  # the compliant protein HGVS annotation, e.g. "NP_000537.3:p.Pro72Arg"
+    # )
+    # hgvs_r_compliant: str | None = (
+    #     None  # the compliant RNA HGVS annotation, e.g. "NR_000537.3:r.215C>G"
+    # )
+
+    def __repr__(self):
+        return f"Mutation(seq_id={self.seq_id}, genomic_id={self.genomic_id}, chromosome={self.chromosome}, strand={self.strand}, region_type={self.region_type}, mutation_pos={self.mutation_pos}, genomic_pos={self.genomic_pos}, cds_pos={self.cds_pos}, ref={self.ref}, alt={self.alt}, mutation_type={self.mutation_type}, ref_codon={self.ref_codon}, alt_codon={self.alt_codon}, ref_aa={self.ref_aa}, alt_aa={self.alt_aa}, prot_pos={self.prot_pos}, hgvs_g={self.hgvs_g}, hgvs_c={self.hgvs_c}, hgvs_p={self.hgvs_p})"
+
+    def __str__(self):
+        return f"Mutation(\nseq_id={self.seq_id},\ngenomic_id={self.genomic_id},\nchromosome={self.chromosome},\nstrand={self.strand},\nregion_type={self.region_type},\nmutation_pos={self.mutation_pos},\ngenomic_pos={self.genomic_pos},\ncds_pos={self.cds_pos},\nref={self.ref},\nalt={self.alt},\nmutation_type={self.mutation_type},\nref_codon={self.ref_codon},\nalt_codon={self.alt_codon},\nref_aa={self.ref_aa},\nalt_aa={self.alt_aa},\nprot_pos={self.prot_pos},\nhgvs_g={self.hgvs_g},\nhgvs_c={self.hgvs_c},\nhgvs_p={self.hgvs_p})"
 
 
 class MutationAnnotator(ABC):
@@ -55,21 +83,7 @@ class MutationAnnotator(ABC):
     @abstractmethod
     def annotate(
         self,
-        seq_id: str,
-        genomic_id: str,
-        chrom: str,
-        mutation_pos: int,
-        genomic_pos: int,
-        region_type: str,
-        ref: str,
-        alt: str,
-        mut_type: str,
-        seq: str,
-        cds_pos: int | None = None,
-        ref_codon: str | None = None,
-        alt_codon: str | None = None,
-        ref_aa: str | None = None,
-        alt_aa: str | None = None,
+        mutation: Mutation,
     ) -> Mutation:
         raise NotImplementedError()
 
@@ -196,15 +210,15 @@ class HGVSMutationAnnotator(MutationAnnotator):
 
     def _annotate_variant(
         self,
-        info: Mutation,
+        mutation: Mutation,
     ) -> tuple[str, str, str, int | None]:
 
         # use_cds = cds_pos is not None
-        chrom_ac = self.CHROM_TO_NC[info.chromosome]
+        chrom_ac = self.CHROM_TO_NC[mutation.chromosome]
 
         # ── 1. Genomisches Variant-Objekt bauen ───────────────────────────
         var_g = self._build_g_variant(
-            chrom_ac, info.genomic_pos, info.ref, info.alt
+            chrom_ac, mutation.genomic_pos, mutation.ref, mutation.alt
         )
 
         # hgvs normalisiert und korrigiert die Referenzbase automatisch
@@ -218,9 +232,9 @@ class HGVSMutationAnnotator(MutationAnnotator):
         # ── 2. g. → c. ────────────────────────────────────────────────────
         hgvs_c = ""
         var_c = None
-        if info.cds_pos and info.genomic_id:
+        if mutation.cds_pos and mutation.genomic_id:
             try:
-                var_c = self.am.g_to_c(var_g, info.genomic_id)
+                var_c = self.am.g_to_c(var_g, mutation.genomic_id)
                 hgvs_c = str(var_c)
             except hgvs.exceptions.HGVSError as e:
                 # z.B. intronic / UTR variants die kein c. haben
@@ -228,25 +242,29 @@ class HGVSMutationAnnotator(MutationAnnotator):
 
         # ── 3. c. → p. ────────────────────────────────────────────────────
         hgvs_p = ""
-        if var_c is not None and info.region_type == "exon":
+        if var_c is not None and mutation.region_type == "exon":
             try:
                 var_p = self.am.c_to_p(var_c)
                 hgvs_p = str(var_p)
             except hgvs.exceptions.HGVSError:
                 hgvs_p = ""
 
-        prot_pos = (info.cds_pos // 3 + 1) if info.cds_pos else None
+        prot_pos = (mutation.cds_pos // 3 + 1) if mutation.cds_pos else None
 
         return hgvs_g, hgvs_c, hgvs_p, prot_pos
 
     def annotate(
         self,
-        info: Mutation,
+        mutation: Mutation,
     ) -> Mutation:
 
-        hgvs_g, hgvs_c, hgvs_p, prot_pos = self._annotate_variant(info)
+        hgvs_g, hgvs_c, hgvs_p, prot_pos = self._annotate_variant(mutation)
         return replace(
-            info, hgvs_g=hgvs_g, hgvs_c=hgvs_c, hgvs_p=hgvs_p, prot_pos=prot_pos
+            mutation,
+            hgvs_g=hgvs_g,
+            hgvs_c=hgvs_c,
+            hgvs_p=hgvs_p,
+            prot_pos=prot_pos,
         )
 
 
@@ -376,177 +394,195 @@ class MaveMutationAnnotator(MutationAnnotator):
 
     def _annotate_variant(
         self,
-        info: Mutation,
+        mutation: Mutation,
     ) -> tuple[str, str, str, int | None]:
         # use_cds = cds_pos is not None
-        chrom_ac = self.CHROM_TO_NC[str(info.chromosome)]
-        c_pos1 = (info.cds_pos + 1) if info.cds_pos else None  # type: ignore[operator]
+        chrom_ac = self.CHROM_TO_NC[str(mutation.chromosome)]
+        c_pos1 = (mutation.cds_pos + 1) if mutation.cds_pos else None  # type: ignore[operator]
 
         # ── 1. g. ─────────────────────────────────────────────────────────
         hgvs_g = self._build_g_hgvs(
-            chrom_ac, info.genomic_pos, info.ref, info.alt
+            chrom_ac, mutation.genomic_pos, mutation.ref, mutation.alt
         )
 
         # ── 2. c. ─────────────────────────────────────────────────────────
         hgvs_c = ""
-        if info.cds_pos and info.genomic_id:
-            if not info.ref and info.alt:
+        if mutation.cds_pos and mutation.genomic_id:
+            if not mutation.ref and mutation.alt:
                 # insertion: 1-based adjacent positions
-                raw_c = f"c.{c_pos1}_{c_pos1 + 1}ins{info.alt}"  # type: ignore[operator]
-            elif info.ref and not info.alt:
-                if len(info.ref) == 1:
+                raw_c = f"c.{c_pos1}_{c_pos1 + 1}ins{mutation.alt}"  # type: ignore[operator]
+            elif mutation.ref and not mutation.alt:
+                if len(mutation.ref) == 1:
                     raw_c = f"c.{c_pos1}del"
                 else:
-                    end = c_pos1 + len(info.ref) - 1  # type: ignore[operator]
+                    end = c_pos1 + len(mutation.ref) - 1  # type: ignore[operator]
                     raw_c = f"c.{c_pos1}_{end}del"
-            elif info.ref_codon and info.alt_codon:
+            elif mutation.ref_codon and mutation.alt_codon:
                 diffs = [
                     i
                     for i in range(3)
-                    if info.ref_codon[i] != info.alt_codon[i]
+                    if mutation.ref_codon[i] != mutation.alt_codon[i]
                 ]
                 if len(diffs) == 1:
-                    pos_nt = info.cds_pos + diffs[0] + 1  # type: ignore[operator]
+                    pos_nt = mutation.cds_pos + diffs[0] + 1  # type: ignore[operator]
                     raw_c = (
                         f"c.{pos_nt}"
-                        f"{info.ref_codon[diffs[0]]}>{info.alt_codon[diffs[0]]}"
+                        f"{mutation.ref_codon[diffs[0]]}>{mutation.alt_codon[diffs[0]]}"
                     )
                 else:
-                    start_nt = info.cds_pos + diffs[0] + 1  # type: ignore[operator]
-                    end_nt = info.cds_pos + diffs[-1] + 1  # type: ignore[operator]
-                    alt_sub = info.alt_codon[diffs[0] : diffs[-1] + 1]
+                    start_nt = mutation.cds_pos + diffs[0] + 1  # type: ignore[operator]
+                    end_nt = mutation.cds_pos + diffs[-1] + 1  # type: ignore[operator]
+                    alt_sub = mutation.alt_codon[diffs[0] : diffs[-1] + 1]
                     raw_c = f"c.{start_nt}_{end_nt}delins{alt_sub}"
             else:
-                raw_c = f"c.{c_pos1}{info.ref}>{info.alt}"
-            hgvs_c = f"{info.genomic_id}:{HgvsVariant(raw_c)}"
+                raw_c = f"c.{c_pos1}{mutation.ref}>{mutation.alt}"
+            hgvs_c = f"{mutation.genomic_id}:{HgvsVariant(raw_c)}"
 
         # ── 3. p. ─────────────────────────────────────────────────────────
         hgvs_p = ""
         if (
-            info.region_type == "exon"
-            and info.ref_aa
-            and info.alt_aa
-            and info.cds_pos
+            mutation.region_type == "exon"
+            and mutation.ref_aa
+            and mutation.alt_aa
+            and mutation.cds_pos
         ):
-            codon_index = info.cds_pos // 3 + 1  # type: ignore[operator]
-            ref_aa_3 = self._AA_1TO3.get(info.ref_aa, info.ref_aa)
-            alt_aa_3 = self._AA_1TO3.get(info.alt_aa, info.alt_aa)
+            codon_index = mutation.cds_pos // 3 + 1  # type: ignore[operator]
+            ref_aa_3 = self._AA_1TO3.get(mutation.ref_aa, mutation.ref_aa)
+            alt_aa_3 = self._AA_1TO3.get(mutation.alt_aa, mutation.alt_aa)
             raw_p = f"p.{ref_aa_3}{codon_index}{alt_aa_3}"
-            hgvs_p = f"{info.genomic_id}:{HgvsVariant(raw_p)}"
+            hgvs_p = f"{mutation.genomic_id}:{HgvsVariant(raw_p)}"
 
-        prot_pos = (info.cds_pos // 3 + 1) if info.cds_pos else None  # type: ignore[operator]
+        prot_pos = (mutation.cds_pos // 3 + 1) if mutation.cds_pos else None  # type: ignore[operator]
         return hgvs_g, hgvs_c, hgvs_p, prot_pos
 
     def annotate(
         self,
-        info: Mutation,
+        mutation: Mutation,
     ) -> Mutation:
-        hgvs_g, hgvs_c, hgvs_p, prot_pos = self._annotate_variant(info)
+        hgvs_g, hgvs_c, hgvs_p, prot_pos = self._annotate_variant(mutation)
         return replace(
-            info, hgvs_g=hgvs_g, hgvs_c=hgvs_c, hgvs_p=hgvs_p, prot_pos=prot_pos
+            mutation,
+            hgvs_g=hgvs_g,
+            hgvs_c=hgvs_c,
+            hgvs_p=hgvs_p,
+            prot_pos=prot_pos,
         )
 
 
 class ManualMutationAnnotator(MutationAnnotator):
 
-    def __generate_hgvs_g(self, info: Mutation) -> str:
+    def __generate_hgvs_g(self, mutation: Mutation) -> str:
         # ============================================================
         # 🧬 GENOMIC HGVS (g.)
         # ============================================================
-        g_start = info.genomic_pos  # this should be 1-based
-        if not info.ref and info.alt:
+        g_start = mutation.genomic_pos  # this should be 1-based
+        if not mutation.ref and mutation.alt:
             # insertion
-            hgvs_g = f"{info.genomic_id}:g.{g_start}_{g_start+1}ins{info.alt}"
+            hgvs_g = f"{mutation.genomic_id}:g.{g_start}_{g_start+1}ins{mutation.alt}"
 
-        elif info.ref and not info.alt:
+        elif mutation.ref and not mutation.alt:
             # deletion
-            if len(info.ref) == 1:
-                hgvs_g = f"{info.genomic_id}:g.{g_start}del"
+            if len(mutation.ref) == 1:
+                hgvs_g = f"{mutation.genomic_id}:g.{g_start}del"
             else:
-                end = g_start + len(info.ref) - 1
-                hgvs_g = f"{info.genomic_id}:g.{g_start}_{end}del"
+                end = g_start + len(mutation.ref) - 1
+                hgvs_g = f"{mutation.genomic_id}:g.{g_start}_{end}del"
 
-        elif info.ref and info.alt and len(info.ref) == len(info.alt) == 1:
+        elif (
+            mutation.ref
+            and mutation.alt
+            and len(mutation.ref) == len(mutation.alt) == 1
+        ):
             # SNP
-            hgvs_g = f"{info.genomic_id}:g.{g_start}{info.ref}>{info.alt}"
+            hgvs_g = f"{mutation.genomic_id}:g.{g_start}{mutation.ref}>{mutation.alt}"
 
         else:
             # complex replacement
-            end = g_start + len(info.ref) - 1
-            hgvs_g = f"{info.genomic_id}:g.{g_start}_{end}delins{info.alt}"
+            end = g_start + len(mutation.ref) - 1
+            hgvs_g = (
+                f"{mutation.genomic_id}:g.{g_start}_{end}delins{mutation.alt}"
+            )
         return hgvs_g
 
-    def __generate_hgvs_c(self, info: Mutation) -> str:
-        if info.cds_pos:
-            c_start = info.cds_pos + 1  # this may be 0-based? should be 1-based
+    def __generate_hgvs_c(self, mutation: Mutation) -> str:
+        if mutation.cds_pos:
+            c_start = (
+                mutation.cds_pos + 1
+            )  # this may be 0-based? should be 1-based
             # ---- insertion ----
-            if not info.ref and info.alt:
-                hgvs_c = f"{info.seq_id}:c.{c_start}_{c_start+1}ins{info.alt}"
+            if not mutation.ref and mutation.alt:
+                hgvs_c = f"{mutation.seq_id}:c.{c_start}_{c_start+1}ins{mutation.alt}"
 
             # ---- deletion ----
-            elif info.ref and not info.alt:
-                if len(info.ref) == 1:
-                    hgvs_c = f"{info.seq_id}:c.{c_start}del"
+            elif mutation.ref and not mutation.alt:
+                if len(mutation.ref) == 1:
+                    hgvs_c = f"{mutation.seq_id}:c.{c_start}del"
                 else:
-                    end = c_start + len(info.ref) - 1
-                    hgvs_c = f"{info.seq_id}:c.{c_start}_{end}del"
+                    end = c_start + len(mutation.ref) - 1
+                    hgvs_c = f"{mutation.seq_id}:c.{c_start}_{end}del"
 
             # ---- codon-aware substitution ----
-            elif info.ref_codon and info.alt_codon:
+            elif mutation.ref_codon and mutation.alt_codon:
 
                 diffs = [
                     i
                     for i in range(3)
-                    if info.ref_codon[i] != info.alt_codon[i]
+                    if mutation.ref_codon[i] != mutation.alt_codon[i]
                 ]
 
                 if len(diffs) == 1:
-                    pos_nt = info.cds_pos + diffs[0] + 1
+                    pos_nt = mutation.cds_pos + diffs[0] + 1
                     hgvs_c = (
-                        f"{info.seq_id}:c.{pos_nt}"
-                        f"{info.ref_codon[diffs[0]]}>{info.alt_codon[diffs[0]]}"
+                        f"{mutation.seq_id}:c.{pos_nt}"
+                        f"{mutation.ref_codon[diffs[0]]}>{mutation.alt_codon[diffs[0]]}"
                     )
 
                 else:
-                    start_nt = info.cds_pos + diffs[0] + 1
-                    end_nt = info.cds_pos + diffs[-1] + 1
-                    alt_sub = info.alt_codon[diffs[0] : diffs[-1] + 1]
+                    start_nt = mutation.cds_pos + diffs[0] + 1
+                    end_nt = mutation.cds_pos + diffs[-1] + 1
+                    alt_sub = mutation.alt_codon[diffs[0] : diffs[-1] + 1]
 
                     hgvs_c = (
-                        f"{info.seq_id}:c.{start_nt}_{end_nt}"
+                        f"{mutation.seq_id}:c.{start_nt}_{end_nt}"
                         f"delins{alt_sub}"
                     )
 
             # ---- fallback SNP ----
-            elif info.ref and info.alt and len(info.ref) == len(info.alt) == 1:
-                hgvs_c = f"{info.seq_id}:c.{c_start}{info.ref}>{info.alt}"
+            elif (
+                mutation.ref
+                and mutation.alt
+                and len(mutation.ref) == len(mutation.alt) == 1
+            ):
+                hgvs_c = f"{mutation.seq_id}:c.{c_start}{mutation.ref}>{mutation.alt}"
 
             else:
-                end = c_start + len(info.ref) - 1
-                hgvs_c = f"{info.seq_id}:c.{c_start}_{end}delins{info.alt}"
+                end = c_start + len(mutation.ref) - 1
+                hgvs_c = (
+                    f"{mutation.seq_id}:c.{c_start}_{end}delins{mutation.alt}"
+                )
 
         else:
             hgvs_c = ""
         return hgvs_c
 
-    def __generate_hgvs_p(self, info: Mutation) -> tuple[str, int | None]:
+    def __generate_hgvs_p(self, mutation: Mutation) -> tuple[str, int | None]:
         if (
-            info.region_type == "exon"
-            and info.ref_aa
-            and info.alt_aa
-            and info.cds_pos
+            mutation.region_type == "exon"
+            and mutation.ref_aa
+            and mutation.alt_aa
+            and mutation.cds_pos
         ):
 
-            prot_pos = info.cds_pos // 3 + 1
+            prot_pos = mutation.cds_pos // 3 + 1
 
-            if info.alt_aa == "*":
-                hgvs_p = f"{info.seq_id}:p.{info.ref_aa}{prot_pos}Ter"
+            if mutation.alt_aa == "*":
+                hgvs_p = f"{mutation.seq_id}:p.{mutation.ref_aa}{prot_pos}Ter"
 
-            elif info.ref_aa == info.alt_aa:
-                hgvs_p = f"{info.seq_id}:p.{info.ref_aa}{prot_pos}="
+            elif mutation.ref_aa == mutation.alt_aa:
+                hgvs_p = f"{mutation.seq_id}:p.{mutation.ref_aa}{prot_pos}="
 
             else:
-                hgvs_p = f"{info.seq_id}:p.{info.ref_aa}{prot_pos}{info.alt_aa}"
+                hgvs_p = f"{mutation.seq_id}:p.{mutation.ref_aa}{prot_pos}{mutation.alt_aa}"
 
         else:
             hgvs_p = ""
@@ -555,20 +591,268 @@ class ManualMutationAnnotator(MutationAnnotator):
 
     def _annotate_variant(
         self,
-        info: Mutation,
+        mutation: Mutation,
     ) -> tuple[str, str, str, int | None]:
-        hgvs_g = self.__generate_hgvs_g(info)
-        hgvs_c = self.__generate_hgvs_c(info)
-        hgvs_p, prot_pos = self.__generate_hgvs_p(info)
+        hgvs_g = self.__generate_hgvs_g(mutation)
+        hgvs_c = self.__generate_hgvs_c(mutation)
+        hgvs_p, prot_pos = self.__generate_hgvs_p(mutation)
 
         return hgvs_g, hgvs_c, hgvs_p, prot_pos
 
     def annotate(
         self,
-        info: Mutation,
+        mutation: Mutation,
     ) -> Mutation:
 
-        hgvs_g, hgvs_c, hgvs_p, prot_pos = self._annotate_variant(info)
+        hgvs_g, hgvs_c, hgvs_p, prot_pos = self._annotate_variant(mutation)
         return replace(
-            info, hgvs_g=hgvs_g, hgvs_c=hgvs_c, hgvs_p=hgvs_p, prot_pos=prot_pos
+            mutation,
+            hgvs_g=hgvs_g,
+            hgvs_c=hgvs_c,
+            hgvs_p=hgvs_p,
+            prot_pos=prot_pos,
+        )
+
+
+class Mutalyzer(MutationAnnotator):
+
+    BASE_URL = "https://mutalyzer.nl/api/normalize/"
+
+    @classmethod
+    def _normalize(cls, hgvs: str) -> dict:
+        encoded = quote(hgvs, safe="")
+        url = f"{cls.BASE_URL}{encoded}"
+
+        r = requests.get(
+            url,
+            params={"only_variants": "false"},
+            headers={"accept": "application/json"},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            raise ValueError(f"Mutalyzer error {r.status_code}: {r.text[:200]}")
+
+        if not r.text.strip():
+            raise ValueError(f"Empty Mutalyzer response for {hgvs}")
+
+        data = r.json()
+        # print("json data", json.dumps(data, indent=2))
+        # fallback-safe extraction
+        return cls._extract_fields(data)
+
+    @staticmethod
+    def _extract_fields(data: dict) -> dict:
+        """
+        Robust Mutalyzer normalization extractor.
+        Works with /api/normalize response structure.
+        """
+
+        # ----------------------------
+        # 1. canonical description (MOST IMPORTANT)
+        # ----------------------------
+        canonical = data.get("normalized_description")
+        transcript_ac = (
+            data.get("normalized_model", {})
+            .get("reference", {})
+            .get("selector", {})
+            .get("id", None)
+        )
+        chrom_ac = (
+            data.get("normalized_model", {})
+            .get("reference", {})
+            .get("reference", {})
+            .get("id", None)
+        )
+
+        if not canonical:
+            # fallback: sometimes only corrected_description exists
+            canonical = data.get("corrected_description")
+
+        # ----------------------------
+        # 2. genomic equivalents
+        # ----------------------------
+        eq = data.get("equivalent_descriptions", {})
+
+        g_list = eq.get("g", [])
+        c_list = eq.get("c", [])
+
+        hgvs_g = g_list[0]["description"] if g_list else None
+
+        # try to pick matching transcript (prefer MANE / NM_000546.6 if present)
+        hgvs_c = None
+        for item in c_list:
+            desc = item.get("description")
+            if "NM_000546.6" in desc:
+                hgvs_c = desc
+                break
+
+        # fallback: first c
+        if hgvs_c is None and c_list:
+            hgvs_c = c_list[0]["description"]
+
+        # ----------------------------
+        # 3. protein + rna (optional, often missing)
+        # ----------------------------
+        protein = data.get("protein", {})
+        rna = data.get("rna", {})
+
+        hgvs_p = None
+        hgvs_r = None
+
+        # Mutalyzer does NOT reliably return p/r normalized strings
+        # so we only extract if explicitly present (future-proof)
+        protein_ac = None
+        if isinstance(protein, dict):
+            hgvs_p = protein.get("description") or protein.get("hgvs_p")
+            if hgvs_p:
+                m = re.search(r"\((NP_[0-9]+\.[0-9]+)\)", hgvs_p)
+                protein_ac = m.group(1) if m else None
+            else:
+                print("protein was", protein, hgvs_p)
+
+        if isinstance(rna, dict):
+            hgvs_r = rna.get("description") or rna.get("hgvs_r")
+
+        # ----------------------------
+        # 4. fallback consistency rule
+        # ----------------------------
+        if canonical and not hgvs_c:
+            hgvs_c = canonical
+        protein = "notImplemented"
+        return {
+            "hgvs_c": hgvs_c,
+            "hgvs_g": hgvs_g,
+            "hgvs_p": hgvs_p,
+            "hgvs_r": hgvs_r,
+            "reference_ac": chrom_ac,
+            "transcript_ac": transcript_ac,
+            "protein_ac": protein_ac,
+            "raw": data,
+        }
+
+    @classmethod
+    def normalize_hgvs_c(cls, hgvs_c: str) -> dict:
+        if "c." not in hgvs_c and "NM_" not in hgvs_c:
+            raise ValueError("Invalid hgvs_c")
+        return cls._normalize(hgvs_c)
+
+    @classmethod
+    def normalize_hgvs_g(cls, hgvs_g: str) -> dict:
+        if ":g." not in hgvs_g:
+            raise ValueError("Invalid hgvs_g")
+        return cls._normalize(hgvs_g)
+
+    @classmethod
+    def normalize_hgvs_r(cls, hgvs_r: str) -> dict:
+        if ":r." not in hgvs_r and not hgvs_r.startswith("r."):
+            raise ValueError("Invalid hgvs_r")
+        return cls._normalize(hgvs_r)
+
+    @classmethod
+    def normalize_hgvs_p(cls, hgvs_p: str) -> dict:
+        try:
+            return cls._normalize(hgvs_p)
+        except Exception:
+            return {
+                "hgvs_p": hgvs_p,
+                "hgvs_c": None,
+                "hgvs_g": None,
+                "hgvs_r": None,
+            }
+
+    @classmethod
+    def normalize(cls, hgvs: str) -> dict:
+        return cls._normalize(hgvs)
+
+    @classmethod
+    def _normalize_mutalyzer_to_hgvs(
+        cls, hgvs: str | None, id: str | None = None
+    ) -> str | None:
+        ret = f"{id}:{hgvs.split(':', 1)[-1]}" if hgvs and id else hgvs
+        if ret and "[" in ret:
+            ret = cls.fix_mutalyzer_repeat(ret)
+        return ret
+
+    @classmethod
+    def fix_mutalyzer_repeat(cls, hgvs: str) -> str:
+        """
+        Converts Mutalyzer repeat notation (A[3]) into HGVS-compatible ins notation.
+        Works for c. and g. coordinates.
+        """
+        pattern = re.compile(r"([cg]\.)(\d+)([ACGT])\[(\d+)\]")
+
+        def repl(match):
+            coord_type = match.group(1)  # c. or g.
+            pos = int(match.group(2))
+            base = match.group(3)
+            n = int(match.group(4))
+
+            if n <= 1:
+                return match.group(0)
+
+            inserted = base * (n - 1)
+            return f"{coord_type}{pos}_{pos+1}ins{inserted}"
+
+        return pattern.sub(repl, hgvs)
+
+    @classmethod
+    def mutalyzer_to_hgvs(
+        cls,
+        mutalyzer_out: dict[str, str],
+    ) -> dict[str, str | None]:
+        """
+        Extrahiert aus Mutalyzer-Ausgabe die wichtigsten Felder für die
+        Mutation-Instanz.
+        Gibt ein dict mit hgvs_c, hgvs_g, hgvs_p, hgvs_r, chrom_ac, transcript_ac,
+        protein_ac zurück.
+        """
+        # print(json.dumps(mutalyzer_out["raw"], indent=2))
+        try:
+            data = {}
+            hgvs_c = mutalyzer_out.get("hgvs_c")
+            hgvs_g = mutalyzer_out.get("hgvs_g")
+            hgvs_p = mutalyzer_out.get("hgvs_p")
+            hgvs_r = mutalyzer_out.get("hgvs_r")
+            chrom_ac = mutalyzer_out.get("chrom_ac")
+            transcript_ac = mutalyzer_out.get("transcript_ac")
+            protein_ac = mutalyzer_out.get("protein_ac")
+            data["hgvs_c"] = cls._normalize_mutalyzer_to_hgvs(
+                hgvs_c, transcript_ac
+            )
+            data["hgvs_g"] = cls._normalize_mutalyzer_to_hgvs(hgvs_g, chrom_ac)
+            data["hgvs_p"] = cls._normalize_mutalyzer_to_hgvs(
+                hgvs_p, protein_ac
+            )
+            data["hgvs_r"] = cls._normalize_mutalyzer_to_hgvs(
+                hgvs_r, transcript_ac
+            )
+            return data
+        except Exception:
+            print(mutalyzer_out["raw"])
+            raise
+
+    @classmethod
+    def mutalyzer_to_hgvs_compliant(cls, hgvs, accession: str) -> str | None:
+        return cls._normalize_mutalyzer_to_hgvs(hgvs, accession)
+
+    def annotate(
+        self,
+        mutation: Mutation,
+    ) -> Mutation:
+        var_g = HGVSMutationAnnotator._build_g_variant(
+            mutation.genomic_id,
+            mutation.genomic_pos,
+            mutation.ref,
+            mutation.alt,
+        )
+        normalized = self.normalize(str(var_g))
+        # print("mutalyzer", normalized)
+        # print("compliant", hgvs_compliant)
+
+        return replace(
+            mutation,
+            hgvs_g=normalized["hgvs_g"],
+            hgvs_c=normalized["hgvs_c"],
+            hgvs_p=normalized["hgvs_p"],
+            prot_pos=normalized.get("prot_pos"),
         )

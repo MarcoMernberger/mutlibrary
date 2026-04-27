@@ -1,3 +1,5 @@
+>Test_genomic dna:chromosome chromosome:GRCh38:17:1000:1040:1
+CCCCCTTTTTAAAAATGGAATTTTACCCCCTTTTTGGGGG
 >Test_CDS
 ATGGAATTTTAA
 >Test_Exon_Truncation

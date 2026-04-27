@@ -1,12 +1,15 @@
 import itertools
 
-import pandas as pd
-import pytest
+import pandas as pd  # type: ignore[import]
+import pytest  # type: ignore[import]
 from Bio.Data import CodonTable  # type: ignore[import]
 from Bio.SeqIO import SeqRecord  # type: ignore[import]
-from pandas import DataFrame
+from pandas import DataFrame  # type: ignore[import]
 
-from mutlibrary.models.mutator import MultiSeqMutatorHGVS, MutatorHGVS
+from mutlibrary.models.mutator import (  # type: ignore[import]
+    MultiSeqMutatorHGVS,
+    MutatorHGVS,
+)
 
 ########################################################################################
 # Fixtures
@@ -42,9 +45,14 @@ def cds(records):
 
 
 @pytest.fixture
-def mutator(sample, regions, cds, annotations):
+def genomic(records):
+    return records["Test_genomic"]
+
+
+@pytest.fixture
+def mutator(sample, regions, cds, genomic, annotations):
     return MultiSeqMutatorHGVS(
-        sample, regions[sample.id], cds, annotations[sample.id]
+        sample, regions[sample.id], genomic, cds, annotations[sample.id]
     )
 
 

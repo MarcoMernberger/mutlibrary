@@ -4,7 +4,7 @@ from itertools import product
 from pathlib import Path
 from typing import Any, Literal
 
-import pandas as pd
+import pandas as pd  # type: ignore[import]
 from Bio import Align, SeqIO  # type: ignore[import]
 from Bio.Data import CodonTable  # type: ignore[import]
 from mmalignments.models.elements import (  # type: ignore[import]
@@ -20,7 +20,7 @@ from mmalignments.models.tags import (  # type: ignore[import]
     PartialElementTag,  # type: ignore[import]
 )
 from mmalignments.services.io import from_json  # type: ignore[import]
-from pandas import DataFrame
+from pandas import DataFrame  # type: ignore[import]
 
 from mutlibrary.models.annotator import (  # type: ignore[import]
     HGVSMutationAnnotator,
@@ -71,6 +71,7 @@ class MultiSeqMutatorHGVS:
         self,
         record: SeqIO.SeqRecord,
         regions: list[dict[str, Any]],
+        genomic: SeqIO.SeqRecord | None = None,
         cds: SeqIO.SeqRecord | None = None,
         annotation: dict | None = None,
         annotator: MutationAnnotator | None = None,
@@ -78,6 +79,7 @@ class MultiSeqMutatorHGVS:
         self.record = record
         self.regions = regions
         self.cds = cds
+        self.genomic = genomic
         self.annotation = annotation
         self.annotator = annotator or ManualMutationAnnotator()
         self.genomic_start = (
@@ -85,6 +87,7 @@ class MultiSeqMutatorHGVS:
         )
         self.genomic_id = annotation.get("genomic_id", "") if annotation else ""
         self.chromosome = annotation.get("chromosome", "") if annotation else ""
+        self.__infer_from_genomic_description()
         self.bases = ["A", "C", "G", "T"]
         self.codon_table = CodonTable.unambiguous_dna_by_name["Standard"]
         self.codon_map = dict(self.codon_table.forward_table)
@@ -93,6 +96,13 @@ class MultiSeqMutatorHGVS:
         self.combined_table = Path(f"cache/{self.record.id}_variants.tsv")
         self.cds_codons = self.build_cds_codon_mapping()
         self.max_len = 3
+
+    def __infer_from_genomic_description(self):
+        if self.genomic:
+            desc = self.genomic.description
+            splits = desc.split(":")
+            strand = int(splits[-1])
+            self.strand = int(strand)
 
     def map_exon_to_cds(self, exon_seq: str) -> int:
         if self.cds is None:
@@ -312,6 +322,7 @@ class MultiSeqMutatorHGVS:
                         seq_id=seq_id,
                         genomic_id=self.genomic_id,
                         chromosome=self.chromosome,
+                        strand=self.strand,
                         mutation_pos=exon_pos,
                         genomic_pos=self.genomic_start + exon_pos,
                         region_type="exon",
@@ -379,6 +390,7 @@ class MultiSeqMutatorHGVS:
                         seq_id=seq_id,
                         genomic_id=self.genomic_id,
                         chromosome=self.chromosome,
+                        strand=self.strand,
                         region_type=rtype,
                         mutation_pos=pos,
                         genomic_pos=self.genomic_start + pos,
@@ -429,6 +441,7 @@ class MultiSeqMutatorHGVS:
                         seq_id=seq_id,
                         genomic_id=self.genomic_id,
                         chromosome=self.chromosome,
+                        strand=self.strand,
                         region_type=rtype,
                         mutation_pos=pos,
                         genomic_pos=self.genomic_start + pos,
@@ -486,6 +499,7 @@ class MultiSeqMutatorHGVS:
                     seq_id=seq_id,
                     genomic_id=self.genomic_id,
                     chromosome=self.chromosome,
+                    strand=self.strand,
                     region_type=rtype,
                     mutation_pos=pos,
                     genomic_pos=self.genomic_start + pos,
@@ -577,7 +591,7 @@ class MultiSeqMutatorHGVS:
         return df
 
     @staticmethod
-    def consolidate(mutations: DataFrame) -> DataFrame:
+    def deduplicate(mutations: DataFrame) -> DataFrame:
         mutations = mutations.drop_duplicates(subset="seq")
         return mutations
 
@@ -643,79 +657,107 @@ class MutatorHGVS:
     def create_all_mutations(
         self,
         fasta: Path | str,
-        region_json: Path | str | None = None,
+        region_json: Path | str,
+        cds_id: str,
+        genomic_id: str = "17",
         annotation_json: Path | str | None = None,
-        cds_id: str | None = None,
-        annotator: Literal["manual", "mave", "hgvs"] = "manual",
+        annotator_to_use: Literal["manual", "mave", "hgvs"] = "manual",
         deduplicate: bool = False,
     ) -> DataFrame:
         records = self.read_records(fasta)
         regions = self.region_definitions(region_json, records)
         annotations = self.record_annotations(annotation_json, records)
-        annotator = self.select_annotator(annotator_to_use=annotator)
+        # annotator = self.select_annotator(annotator_to_use)
         to_concat = []
-        cds = records[cds_id] if cds_id else None
+        cds = records[cds_id]
+        genomic = records[genomic_id]
         for seq_id, record in records.items():
             if seq_id == cds_id:
                 continue
             mutator = MultiSeqMutatorHGVS(
-                record[seq_id], regions[seq_id], cds, annotations[seq_id]
+                record[seq_id],
+                regions[seq_id],
+                genomic,
+                cds,
+                annotations[seq_id],
+                self.select_annotator(annotator_to_use),
             )
             mutations = mutator.generate_mutations()
             if deduplicate:
-                mutations = mutator.consolidate(mutations)
+                mutations = mutator.deduplicate(mutations)
             to_concat.append(mutations)
         combined = pd.concat(to_concat, ignore_index=True)
         return combined
 
     def generate_mutations(
         self,
-        fasta: Path | str,
         output_file: str | Path,
-        region_json: Path | str | None = None,
+        fasta: Path | str,
+        region_json: Path | str,
+        cds_id: str,
+        genomic_id: str,
         annotation_json: Path | str | None = None,
-        cds_id: str | None = None,
-        annotator: Literal["manual", "mave", "hgvs"] = "manual",
+        annotator_to_use: Literal["manual", "mave", "hgvs"] = "manual",
         deduplicate: bool = False,
     ) -> None:
         combined = self.create_all_mutations(
-            fasta, region_json, annotation_json, cds_id, annotator, deduplicate
+            fasta,
+            region_json,
+            cds_id,
+            genomic_id,
+            annotation_json,
+            annotator_to_use,
+            deduplicate,
         )
         combined.to_csv(output_file, sep="\t", index=False)
 
     def generate_from_clinvar(
         self,
         output_file: Path | str,
-        clinvar_cases_file: Path | str,
         fasta: Path | str,
-        cds_id: str | None = None,
-        genomics_id: str | None = "17",
-        annotation_json: Path | str | None = None,
+        clinvar_cases_file: Path | str,
+        cds_id: str,
+        genomics_id: str = "17",
+        # transcript_ac="NM_000546.6",
+        # chrom_ac="NC_000017.11",
+        cdot_json: Path | str = "/incoming/cdot-0.2.21.refseq.grch38_tp53.json",
+        # annotation_json: Path | str | None = None,
+        # seq_id_prefix="var",
+        # genomic_flanks=(
+        #     7673511,
+        #     7673636,
+        # ),  # checked in ensembl browser for exon 9 part of TP53
     ) -> None:
         clinvar_cases = pd.read_csv(clinvar_cases_file, sep="\t")
         records = self.read_records(fasta)
-        genomic = records.get(genomics_id, None)
-        cds = records[cds_id] if cds_id else None
-        cds_start_in_genomic_0 = (
-            genomic.seq.find(cds.seq[:15]) if genomic and cds else None
-        )
-        annotations = self.record_annotations(annotation_json, records)
+        genomic = records.get(genomics_id)
+        cds = records.get(cds_id)
+        if genomic is None:
+            raise ValueError(
+                f"Genomic sequence with id {genomics_id} not found in fasta"
+            )
+        if cds is None:
+            raise ValueError(
+                f"CDS sequence with id {cds_id} not found in fasta"
+            )
+
+        # annotations = self.record_annotations(annotation_json, records)
         generator = HGVSVariantGenerator(
             genomic=genomic,
             cds=cds,
-            # genomic_start=7668371,  # this is an 1-based chromosomal position, like in Ensembl
-            transcript_ac="NM_000546.6",
-            chrom_ac="NC_000017.11",
-            cdot_json="/project/cdot-0.2.21.refseq.grch38.json.gz",
-            cds_start_in_genomic_0=cds_start_in_genomic_0,
-            seq_id_prefix="var",
-            annotation=annotation_json,
-            genomic_flanks=(7673508, 7673635),
+            # transcript_ac=transcript_ac,
+            # chrom_ac=chrom_ac,
+            cdot_json=cdot_json,
+            seq_id_prefix="predvar",
+            # genomic_flanks=(7673511, 7673636),  # checked in ensembl browser
         )
+
         variants = []
         for _, row in clinvar_cases.iterrows():
             hgvs_c = row["corrected_hgvs_c"]
-            variant = generator.from_hgvs_c(hgvs_c)
+            genomic_start = row["genomic_start"]
+            genomic_end = row["genomic_end"]
+            variant = generator.from_hgvs(hgvs_c, (genomic_start, genomic_end))
             variants.append(variant)
         df = pd.DataFrame([v.__dict__ for v in variants])
         df.to_csv(output_file, sep="\t", index=False)
