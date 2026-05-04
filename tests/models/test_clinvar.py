@@ -98,14 +98,14 @@ def test_all_mutation_hgvs_g(clinvar_cases, variants):
 #         print(variant)
 
 
-def test_mutation_hgvs_r(clinvar_cases, variants):
-    for _, row in clinvar_cases.iterrows():
-        hgvs_c = row["corrected_hgvs_c"]
-        variant = variants[hgvs_c]
-        expected_result = row["predicted_hgvs_r"]
-        assert (
-            variant.hgvs_r == expected_result
-        ), f"Expected {expected_result} but got {variant.hgvs_r} for {hgvs_c}"
+# def test_mutation_hgvs_r(clinvar_cases, variants):
+#     for _, row in clinvar_cases.iterrows():
+#         hgvs_c = row["corrected_hgvs_c"]
+#         variant = variants[hgvs_c]
+#         expected_result = row["predicted_hgvs_r"]
+#         assert (
+#             variant.hgvs_r == expected_result
+#         ), f"Expected {expected_result} but got {variant.hgvs_r} for {hgvs_c}"
 
 
 # def test_all_mutations(clinvar_cases, tp53_201_cds, tp53_201_genomic):

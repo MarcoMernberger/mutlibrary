@@ -11,17 +11,17 @@
     {
       "name": "exon_mut",
       "type": "exon",
-      "length": 6,
+      "length": 10,
       "start": 27,
-      "end": 33,
+      "end": 37,
       "mutations": ["SNP", "DEL", "INS", "AA"]
     },
     {
       "name": "exon_const",
       "type": "exon",
-      "start": 33,
+      "start": 37,
       "end": 101,
-      "length": 68,
+      "length": 64,
       "mutations": []
     },
     {

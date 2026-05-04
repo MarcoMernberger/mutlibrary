@@ -207,11 +207,14 @@ class MultiSeqMutatorHGVS:
         """
         seq = str(self.record.seq)
         mapping = self.cds_codons
+        print("mapping", mapping)
         mutatable_codon_positions = []
         start, end = region["start"], region["end"]
         exon = seq[start:end]
+        print("exon", exon)
         cds_start = self.map_exon_to_cds(exon)
         # CDS Positionen, die in diesem Exon liegen
+        print("cds_start", cds_start)
         cds_positions = [cds_start + i for i in range(len(exon))]
         if cds_start not in mapping:
             # handle truncated start codon
@@ -232,7 +235,7 @@ class MultiSeqMutatorHGVS:
                         )
                     )
                     break
-
+        print("cds_positions", cds_positions)
         last_covered_cds_pos = cds_positions[-1] + 1
         for exon_pos, cds_pos in enumerate(cds_positions):
             if cds_pos in mapping:  # this covers all full codons
@@ -251,9 +254,17 @@ class MultiSeqMutatorHGVS:
                             False,  # keep the end constant
                         )
                     )
+                    print(
+                        exon_pos,
+                        cds_pos,
+                        cds_pos_end,
+                        last_covered_cds_pos,
+                        in_exon,
+                        codon,
+                    )
                 else:
                     # full codon in exo
-                    in_exon = exon[exon_pos:cds_pos_end]
+                    in_exon = exon[exon_pos : min(exon_pos + 3, len(exon))]
                     mutatable_codon_positions.append(
                         (
                             cds_pos,
@@ -264,7 +275,15 @@ class MultiSeqMutatorHGVS:
                             True,  # keep the front constant if truncated
                         )
                     )
-
+                    print(
+                        exon_pos,
+                        cds_pos,
+                        cds_pos_end,
+                        last_covered_cds_pos,
+                        in_exon,
+                        codon,
+                    )
+                # last_covered_cds_pos = cds_pos
         return mutatable_codon_positions
 
     def is_valid_window(self, pos, length, position_map):
@@ -341,7 +360,6 @@ class MultiSeqMutatorHGVS:
                 pos_in_codon,
                 constant_front,
             ) in codon_blocks:
-
                 current_start = region["start"] + exon_pos
                 ref_aa = self.codon_map[codon]
                 minimal_changes_codons = self.get_minmimal_hamming_synonyms(
@@ -362,6 +380,15 @@ class MultiSeqMutatorHGVS:
                         exon_subseq,
                         constant_front,
                     )
+                    print("the local index:", current_start)
+                    print(
+                        exon_pos,
+                        cds_pos,
+                        exon_subseq,
+                        codon,
+                        pos_in_codon,
+                        constant_front,
+                    )
 
                     # mutation type
                     mutation_type = "nonsense" if alt_aa == "*" else "missense"
@@ -380,8 +407,10 @@ class MultiSeqMutatorHGVS:
                         genomic_start=self.genomic_start,
                         genomic_end=self.genomic_end,
                         strand=self.strand,
-                        mutation_pos=exon_pos,
-                        genomic_pos=self.get_genomic_pos_from_local(exon_pos),
+                        mutation_pos=current_start,
+                        genomic_pos=self.get_genomic_pos_from_local(
+                            current_start
+                        ),
                         region_type="exon",
                         ref=ref,
                         alt=alt,
@@ -546,6 +575,7 @@ class MultiSeqMutatorHGVS:
                         print("at 0 is:", seq[0], "at pos is:", seq[pos])
 
                         raise
+                    print()
                     mutation = Mutation(
                         seq_id=seq_id,
                         genomic_id=self.genomic_id,

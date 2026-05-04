@@ -231,7 +231,34 @@ class HGVSMutationAnnotator(MutationAnnotator):
             return f"{prefix}{mutation.genomic_pos}_{mutation.genomic_pos + len(mutation.ref) - 1}delins{mutation.alt}"  # noqa: E501
         return f"{prefix}{mutation.genomic_start-1}_{mutation.genomic_end}delins{mutation.genomic}"  # noqa: E501
 
-    def build_g_variant(self, mutation: Mutation):
+    # @staticmethod
+    # def _build_g_variant(chrom_ac: str, genomic_pos: int, ref: str, alt: str):
+    #     """
+    #     Builds a SequenceVariant object for the genomic g. representation.
+    #     genomic_pos is 0-based → will be internally converted to 1-based.
+    #     """
+    #     g_pos1 = genomic_pos  # + 1
+    #     ref_len = len(ref)
+    #     print("ref_len:", ref_len, "alt:", alt)
+    #     if ref_len <= 1:
+    #         pos = hgvs.location.SimplePosition(g_pos1)
+    #         interval = hgvs.location.Interval(start=pos, end=pos)
+    #     else:
+    #         start = hgvs.location.SimplePosition(g_pos1)
+    #         end = hgvs.location.SimplePosition(g_pos1 + ref_len - 1)
+    #         interval = hgvs.location.Interval(start=start, end=end)
+
+    #     edit = HGVSMutationAnnotator._build_hgvs_edit(ref, alt)
+    #     posedit = hgvs.posedit.PosEdit(pos=interval, edit=edit)
+
+    #     return SequenceVariant(
+    #         ac=chrom_ac,
+    #         type="g",
+    #         posedit=posedit,
+    #     )
+
+    @staticmethod
+    def build_g_variant(mutation: Mutation) -> SequenceVariant:
         """
         Build a genomic HGVS SequenceVariant from a Mutation object.
         Uses VCF-style (pos, ref, alt).
@@ -239,68 +266,63 @@ class HGVSMutationAnnotator(MutationAnnotator):
 
         pos = mutation.genomic_pos  # 1-based
         ref = mutation.ref
+        ref_len = len(ref)
         alt = mutation.alt
-
-        # SNP
-        if len(ref) == 1 and len(alt) == 1:
-            loc = hgvs.location.SimplePosition(pos)
-            edit = hgvs.edit.NARefAlt(ref=ref, alt=alt)
-
-            return hgvs.sequencevariant.SequenceVariant(
-                ac=mutation.chromosome_ac,
-                type="g",
-                posedit=hgvs.posedit.PosEdit(loc, edit),
-            )
-
-        # DEL
-        if len(ref) > 0 and alt == "":
-            start = pos
-            end = pos + len(ref) - 1
-
-            loc = hgvs.location.Interval(
-                start=hgvs.location.SimplePosition(start),
-                end=hgvs.location.SimplePosition(end),
-            )
-            edit = hgvs.edit.NARefAlt(ref=ref, alt=None)
-
-            return hgvs.sequencevariant.SequenceVariant(
-                ac=mutation.chromosome_ac,
-                type="g",
-                posedit=hgvs.posedit.PosEdit(loc, edit),
-            )
-
-        # INS
-        if ref == "" and len(alt) > 0:
-            # HGVS insertion: between bases → position is between pos-1 and pos
-            start = pos - 1
-            end = pos
-
-            loc = hgvs.location.Interval(
-                start=hgvs.location.SimplePosition(start),
-                end=hgvs.location.SimplePosition(end),
-            )
-            edit = hgvs.edit.NARefAlt(ref=None, alt=alt)
-
-            return hgvs.sequencevariant.SequenceVariant(
-                ac=mutation.chromosome_ac,
-                type="g",
-                posedit=hgvs.posedit.PosEdit(loc, edit),
-            )
-
-        # DELINS (catch-all: MNV, missense, nonsense, etc.)
-        start = pos
-        end = pos + len(ref) - 1
-
-        loc = hgvs.location.Interval(
-            start=hgvs.location.SimplePosition(start),
-            end=hgvs.location.SimplePosition(end),
+        alt_len = len(alt)
+        print(
+            "Building g. variant for mutation:",
+            alt,
+            ref,
+            ref_len,
+            alt_len,
+            "at pos",
+            pos,
         )
-        edit = hgvs.edit.NARefAlt(ref=ref, alt=alt)
+        if ref_len == 1 and alt_len == 1:
+            # SNP
+            start = hgvs.location.SimplePosition(pos)
+            interval = hgvs.location.Interval(start=start, end=start)
+
+        elif ref_len > 0 and alt_len == 0:
+            # DEL
+            if mutation.strand == 1:
+                start = hgvs.location.SimplePosition(pos)
+                end = hgvs.location.SimplePosition(pos + ref_len - 1)
+            else:
+                start = hgvs.location.SimplePosition(pos - ref_len + 1)
+                end = hgvs.location.SimplePosition(pos)
+            # start = hgvs.location.SimplePosition(pos)
+            # end = hgvs.location.SimplePosition(pos + ref_len - 1)
+            interval = hgvs.location.Interval(start=start, end=end)
+            print(interval)
+        # INS
+        elif ref_len == 0 and alt_len > 0:
+            # HGVS insertion: between bases → position is between pos-1 and pos
+            if mutation.strand == 1:
+                start = hgvs.location.SimplePosition(pos - 1)
+                end = hgvs.location.SimplePosition(pos)
+            else:
+                start = hgvs.location.SimplePosition(pos)
+                end = hgvs.location.SimplePosition(pos + 1)
+            interval = hgvs.location.Interval(start=start, end=end)
+
+        else:
+            # DELINS (catch-all: MNV, missense, nonsense, etc.)
+            if mutation.strand == 1:
+                start = hgvs.location.SimplePosition(pos)
+                end = hgvs.location.SimplePosition(pos + ref_len - 1)
+            else:
+                start = hgvs.location.SimplePosition(pos - ref_len + 1)
+                end = hgvs.location.SimplePosition(pos)
+            interval = hgvs.location.Interval(start=start, end=end)
+
+        edit = HGVSMutationAnnotator._build_hgvs_edit(ref, alt)
+        posedit = hgvs.posedit.PosEdit(pos=interval, edit=edit)
 
         return SequenceVariant(
             ac=mutation.chromosome_ac,
             type="g",
-            posedit=hgvs.posedit.PosEdit(loc, edit),
+            posedit=posedit,
         )
 
     ############################################################################
@@ -358,32 +380,6 @@ class HGVSMutationAnnotator(MutationAnnotator):
             ac=seq_id,
             type="g",
             posedit=hgvs.posedit.PosEdit(loc, edit),
-        )
-
-    @staticmethod
-    def _build_g_variant(chrom_ac: str, genomic_pos: int, ref: str, alt: str):
-        """
-        Builds a SequenceVariant object for the genomic g. representation.
-        genomic_pos is 0-based → will be internally converted to 1-based.
-        """
-        g_pos1 = genomic_pos  # + 1
-        ref_len = len(ref)
-
-        if ref_len <= 1:
-            pos = hgvs.location.SimplePosition(g_pos1)
-            interval = hgvs.location.Interval(start=pos, end=pos)
-        else:
-            start = hgvs.location.SimplePosition(g_pos1)
-            end = hgvs.location.SimplePosition(g_pos1 + ref_len - 1)
-            interval = hgvs.location.Interval(start=start, end=end)
-
-        edit = HGVSMutationAnnotator._build_hgvs_edit(ref, alt)
-        posedit = hgvs.posedit.PosEdit(pos=interval, edit=edit)
-
-        return SequenceVariant(
-            ac=chrom_ac,
-            type="g",
-            posedit=posedit,
         )
 
     ############################################################################
@@ -447,7 +443,8 @@ class HGVSMutationAnnotator(MutationAnnotator):
             )  # noqa: E501
             return ""
         print("hgvs_c_to_r input: ", hgvs_c)
-        return hgvs_c.replace("c.", "r.(") + ")"
+        split = hgvs_c.split(":")
+        return f"{split[0]}:r.({split[1][2:].lower()})"
 
     def _normalize_hgvs(
         self,
@@ -498,12 +495,14 @@ class HGVSMutationAnnotator(MutationAnnotator):
     ) -> tuple[str, str, str | None, str | None, int | None]:
 
         # var_g
-        var_g = self._build_g_variant(
-            mutation.chromosome_ac,
-            mutation.genomic_pos,
-            mutation.ref,
-            mutation.alt,
+        var_g = self.build_g_variant(
+            mutation,
+            # mutation.chromosome_ac,
+            # mutation.genomic_pos,
+            # mutation.ref,
+            # mutation.alt,
         )
+        print("var_g", var_g)
         try:
             var_g = self.am.normalize(var_g)
         except Exception:
@@ -562,6 +561,10 @@ class HGVSMutationAnnotator(MutationAnnotator):
         except Exception as e:
             print(f"Error annotating mutation {mutation.seq_id}: {e}")
             print("mutation: ", mutation)
+            print("refseq: ", mutation.refseq)
+            print("coding: ", mutation.coding)
+            print("genomic: ", mutation.genomic)
+
             raise
             hgvs_g, hgvs_c, hgvs_r, hgvs_p, prot_pos = "", "", "", "", None
         return replace(
@@ -715,6 +718,18 @@ class HGVSMutationAnnotator(MutationAnnotator):
 #         hgvs_c = ""
 #         if mutation.cds_pos and mutation.genomic_id:
 #             if not mutation.ref and mutation.alt:
+#                 ]
+
+#                 if len(diffs) == 1:
+#                     pos_nt = mutation.cds_pos + diffs[0] + 1
+#                     hgvs_c = (
+#                         f"{mutation.seq_id}:c.{pos_nt}"
+#                         f"{mutation.ref_codon[diffs[0]]}>{mutation.alt_codon[diffs[0]]}"  # noqa: E501
+#                     )
+
+#                 else:
+#                     start_nt = mutation.cds_pos + diffs[0] + 1
+#                     end_nt = mutation.cds_pos + diffs[-1] + 1
 #                 # insertion: 1-based adjacent positions
 #                 raw_c = f"c.{c_pos1}_{c_pos1 + 1}ins{mutation.alt}"  # type: ignore[operator]
 #             elif mutation.ref and not mutation.alt:

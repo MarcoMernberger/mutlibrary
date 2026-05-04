@@ -28,54 +28,6 @@ class MockAnnotator(MutationAnnotator):
 
 
 @pytest.fixture
-def records(test_fasta):
-    major = MutatorHGVS()
-    return major.read_records(test_fasta)
-
-
-@pytest.fixture
-def regions(test_region, records):
-    major = MutatorHGVS()
-    return major.region_definitions(
-        test_region,
-        records,
-        exclude=[
-            "TP53-201_cds_protein_coding",
-            "17",
-            "Test_CDS",
-            "Test_genomic",
-        ],
-    )
-
-
-@pytest.fixture
-def annotations(annotation, records):
-    major = MutatorHGVS()
-    return major.record_annotations(annotation, records)
-
-
-@pytest.fixture
-def real_annotations(annotation, real_records):
-    major = MutatorHGVS()
-    return major.record_annotations(annotation, real_records)
-
-
-@pytest.fixture
-def sample(records):
-    return records["Test_Exon_Truncation"]
-
-
-@pytest.fixture
-def cds(records):
-    return records["Test_CDS"]
-
-
-@pytest.fixture
-def genomic(records):
-    return records["Test_genomic"]
-
-
-@pytest.fixture
 def mutator(sample, regions, cds, genomic, annotations):
     return MultiSeqMutatorHGVS(
         sample,
@@ -88,13 +40,15 @@ def mutator(sample, regions, cds, genomic, annotations):
 
 
 @pytest.fixture
-def real_mutator(real_sample, real_regions, cds, genomic, annotations):
+def real_mutator(
+    real_sample, real_regions, real_cds, real_genomic, real_annotations
+):
     return MultiSeqMutatorHGVS(
         real_sample,
-        genomic,
-        cds,
+        real_genomic,
+        real_cds,
         real_regions[real_sample.id],
-        annotations,
+        real_annotations,
         annotator=HGVSMutationAnnotator(),
     )
 
@@ -182,29 +136,37 @@ def test_annotation(real_annotations, real_regions):
     assert annotation_for_cds["protein_ac"] == "NP_000537.3"
 
 
-def test_mutalyzer_on_generated_sequences(real_mutations, real_mutator):
-    # assert isinstance(
-    #     real_mutator.annotator, Mutalyzer  # HGVSMutationAnnotator
-    # ), f"annotator should be HGVSMutationAnnotator, was {type(real_mutator.annotator)}"
-    print("anno is", type(real_mutator.annotator))
+def test_hgvs_on_generated_sequences(
+    real_mutations, real_mutator, p53_examples
+):
+    assert isinstance(
+        real_mutator.annotator, HGVSMutationAnnotator
+    ), f"annotator should be HGVSMutationAnnotator, was {type(real_mutator.annotator)}"
+    unchecked = set(p53_examples.index.values)
     for mutation in real_mutations:
-        print(
-            mutation.hgvs_g,
-            mutation.hgvs_c,
-            mutation.hgvs_p,
-            mutation.hgvs_r,
-            mutation.genomic,
-        )
         assert mutation.hgvs_g, f"Missing HGVS g for {mutation}"
         if mutation.region_type == "exon":
             assert mutation.hgvs_c, f"Missing HGVS c for {mutation}"
-            assert mutation.hgvs_p is not None, f"Missing HGVS p for {mutation}"
         assert mutation.coding, f"Missing coding sequence for {mutation}"
-        # assert mutation.genomic, f"Missing genomic sequence for {mutation}"
-        # assert (
-        #     mutation.protein is not None
-        # ), f"Missing protein sequence for {mutation}"
-    raise ValueError("Stop here to check the printed mutations")
+        assert mutation.genomic, f"Missing genomic sequence for {mutation}"
+        if "TAGCACTGCCCAACCTAAACACCAGCTCCTCT" in mutation.coding:
+            print("Found expected sequence in coding:", mutation)
+        if "TAGCACTGCCCAACGTTAACACCAGCTCCTCT" in mutation.coding:
+            print("Found expected mutated sequence in coding:", mutation)
+        if "CTAGCACTGCCCAACAAACACCAGCTCCTCTC" in mutation.genomic:
+            print("Found expected sequence in genomic:", mutation)
+        if mutation.hgvs_g in unchecked:
+            print(unchecked)
+            unchecked.remove(mutation.hgvs_g)
+            expected_hgvs_c = p53_examples.loc[mutation.hgvs_g, "hgvsc"]
+            expected_sequence = p53_examples.loc[mutation.hgvs_g, "sequence"]
+            assert (
+                mutation.hgvs_c == expected_hgvs_c
+            ), f"Expected HGVS c {expected_hgvs_c} but got {mutation.hgvs_c} for {mutation}"
+            assert (
+                expected_sequence in mutation.coding
+            ), f"Expected sequence {expected_sequence} not found in coding {mutation.coding} for {mutation}"
+    assert not unchecked, f"HGVS g not tested for: {unchecked}"
 
 
 def test_generate_mutations(mutations):
@@ -473,7 +435,6 @@ def test_amino_acid_mutations(mutations, mutator, sample):
     #     "ACA": "T",
     #     "GTA": "V",
     # }
-    aa.to_csv("test_aa.tsv", sep="\t")
 
     mutable_full_codons = 2 * 20
     truncated_start = 6

@@ -60,10 +60,69 @@ def clinvar_cases():
     return df
 
 
+@pytest.fixture(scope="session")
+def p53_examples():
+    df = pd.read_csv(
+        Path(__file__).parent / "data" / "real_examples.tsv", sep="\t"
+    )
+    df = df.set_index("hgvs_genomic")
+    print(df.index)
+    return df
+
+
+@pytest.fixture
+def records(test_fasta):
+    major = MutatorHGVS()
+    return major.read_records(test_fasta)
+
+
 @pytest.fixture
 def real_records(real_fasta):
     major = MutatorHGVS()
     return major.read_records(real_fasta)
+
+
+@pytest.fixture
+def real_regions(real_region, real_records):
+    major = MutatorHGVS()
+    return major.region_definitions(
+        real_region,
+        real_records,
+        exclude=[
+            "TP53-201_cds_protein_coding",
+            "17",
+        ],
+    )
+
+
+@pytest.fixture
+def regions(test_region, records):
+    major = MutatorHGVS()
+    return major.region_definitions(
+        test_region,
+        records,
+        exclude=[
+            "Test_CDS",
+            "Test_genomic",
+        ],
+    )
+
+
+@pytest.fixture
+def annotations(annotation, records):
+    major = MutatorHGVS()
+    return major.record_annotations(annotation, records)
+
+
+@pytest.fixture
+def real_annotations(annotation, real_records):
+    major = MutatorHGVS()
+    return major.record_annotations(annotation, real_records)
+
+
+@pytest.fixture
+def sample(records):
+    return records["Test_Exon_Truncation"]
 
 
 @pytest.fixture
@@ -72,17 +131,20 @@ def real_sample(real_records):
 
 
 @pytest.fixture
+def cds(records):
+    return records["Test_CDS"]
+
+
+@pytest.fixture
 def real_cds(real_records):
-    print(real_records.keys())
     return real_records["TP53-201_cds_protein_coding"]
+
+
+@pytest.fixture
+def genomic(records):
+    return records["Test_genomic"]
 
 
 @pytest.fixture
 def real_genomic(real_records):
     return real_records["17"]
-
-
-@pytest.fixture
-def real_regions(real_region, real_records):
-    major = MutatorHGVS()
-    return major.region_definitions(real_region, real_records)
