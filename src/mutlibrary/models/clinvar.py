@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import xml.etree.ElementTree as ET
 from functools import cached_property
 from pathlib import Path
 
@@ -9,16 +11,19 @@ import hgvs.location  # type: ignore[import]
 import hgvs.parser  # type: ignore[import]
 import hgvs.posedit  # type: ignore[import]
 import hgvs.sequencevariant  # type: ignore[import]
+import requests  # type: ignore[import]
 from Bio import SeqIO  # type: ignore[import]
 from Bio.Seq import Seq  # type: ignore[import]
-from cdot.hgvs.dataproviders import (  # type: ignore[import]
-    JSONDataProvider,
-    RESTDataProvider,
-)
 from hgvs.sequencevariant import SequenceVariant  # type: ignore[import]
+from mmalignments.services.io import from_json  # type: ignore[import]
 from mmalignments.utils.utils import reverse_complement  # type: ignore[import]
 
-from .annotator import Mutalyzer, Mutation
+from .annotator import (
+    HGVSMutationAnnotator,
+    # Mutalyzer,
+    Mutation,
+    get_info_from_description,
+)
 
 
 def _mut_type(ref: str | None, alt: str | None) -> str:
@@ -71,6 +76,11 @@ def _codon_info(
     return ref_codon, alt_codon, ref_aa, alt_aa, prot_pos
 
 
+# def fix_hgvs_c_annotation(hgvs_c: str) -> str:
+#     """A helper to correct the names in the table. remove this."""
+#     return hgvs_c.replace("(TP53)", "").split()[0]
+
+
 class VariantG:
 
     def __init__(self, var: SequenceVariant):
@@ -103,7 +113,6 @@ class VariantG:
         pos = self.var.posedit.pos
 
         if self.edit_type == "delins":
-            print("CHECK DELINS")
             return self.end - self.start + 1
         # 1. Deletion (del)
         if isinstance(edit, hgvs.edit.NARefAlt) and edit.ref and not edit.alt:
@@ -191,87 +200,82 @@ class VariantG:
 
 class HGVSVariantGenerator:
     """
-    Erzeugt Mutation-Instanzen aus HGVS-Annotationen (hgvs_c oder hgvs_g).
+    A class to generate Mutation instances from HGVS annotations. It can
+    handle both hgvs_c and hgvs_g as input, and will annotate the resulting
+    Mutation with hgvs_g, hgvs_c, hgvs_p, and hgvs_r if possible.
 
     Parameters
     ----------
-    genomic_fasta : str | Path
-        FASTA-Datei mit der genomischen Sequenz des Gens (Plus-Strand).
-    cds_fasta : str | Path
-        FASTA-Datei mit der CDS-Sequenz (ATG...Stop, ohne UTR).
-    gene_start_0 : int
-        0-based chromosomaler Start des genomischen Fragments
-        (d.h. erstes Nukleotid in genomic_fasta entspricht dieser Chromosomenposition).
-    transcript_ac : str
-        RefSeq Transkript-Accession, z.B. "NM_000546.6".
-    chrom_ac : str
-        RefSeq Chromosom-Accession, z.B. "NC_000017.11".
-    chromosome : str
-        Chromosomname für die Mutation-Instanz, z.B. "17".
-    cdot_json : str | Path
-        Pfad zur cdot JSON-Datei für den Dataprovider.
-    assembly : str
-        Assemblyname, z.B. "GRCh38".
-    strand : int
-        +1 für Plus-Strand, -1 für Minus-Strand (TP53 → -1).
-    cds_start_in_genomic_0 : int
-        0-based Position des CDS-Starts (A von ATG) im genomic_fasta-Fragment.
-        Wird gebraucht um cds_pos aus genomischer Position zu berechnen.
-    flanking : int
-        Anzahl Basen Flanking-Region die links/rechts an seq angehängt werden.
-        0 = kein Flanking (Standard).
-    seq_id_prefix : str
-        Präfix für seq_id in der Mutation-Instanz.
+    genomic : SeqIO.SeqRecord
+        Genomic sequence record containing the gene of interest. The
+        description should contain information about the strand, start, end,
+        chromosome, and assembly (e.g., "chr17:7661779-7687550:-1").
+    cds : SeqIO.SeqRecord
+        CDS sequence record containing the coding sequence of the gene.
+    cdot_json : str | Path | None, optional
+        Path to the cdot JSON file for the data provider, by default None.
+    flanking : int, optional
+        Number of bases in the flanking region to be added to the left/right
+        of the sequence, by default 0 (no flanking).
+    genomic_flanks : tuple[int, int] | None, optional
+        Tuple specifying the number of bases to add as flanks to the genomic
+        sequence (left_flank, right_flank), by default None. If provided,
+        this will override the `flanking` parameter for the genomic
+        sequence.
+    annotation_json : Path | str | None, optional
+        Path to the annotation JSON file, by default None. This file should
+        contain a mapping from CDS IDs to transcript and chromosome
+        accessions, as well as protein accessions. If not provided, these
+        fields will be left empty in the Mutation instances.
     """
 
     def __init__(
         self,
         genomic: SeqIO.SeqRecord,
         cds: SeqIO.SeqRecord,
-        # transcript_ac: str,
-        # chrom_ac: str,
         cdot_json: str | Path | None = None,
         flanking: int = 0,
-        seq_id_prefix: str = "var",
         genomic_flanks: tuple[int, int] | None = None,
+        annotation_json: Path | str | None = None,
     ):
         self.genomic = genomic
-        desc = genomic.description
-        splits = desc.split(":")
-        strand = splits[-1]
-        end = splits[-2]
-        start = splits[-3]
-        chromosome = splits[-4]
-        assembly = splits[-5]
-        self.strand = int(strand)
-        self.gene_start_1 = int(start)
-        self.gene_end_1 = int(end)
+        info = get_info_from_description(genomic)
+        self.strand = int(info["strand"])
+        self.gene_start_1 = int(info["start"])
+        self.gene_end_1 = int(info["end"])
+        self.chromosome = info["chromosome"]
+        self.assembly = info["assembly"]
         if self.strand == -1:
             self.genomic.seq = self.genomic.seq.reverse_complement()
-        self.chromosome = chromosome
-        self.assembly = assembly
         self.cds = cds
         self.genomic_flanks = genomic_flanks
         # self.transcript_ac = transcript_ac
         # self.chrom_ac = chrom_ac
         self.flanking = flanking
-        self.seq_id_prefix = seq_id_prefix
         self.cds_start_in_genomic_0 = self._find_cds_start()
         # hgvs setup
-        self.hdp = (
-            JSONDataProvider([str(cdot_json)])
-            if cdot_json
-            else RESTDataProvider()  # Uses API server at cdot.cc
-            # else hgvs.dataproviders.uta.connect()
+        # self.hdp = (
+        #     JSONDataProvider([str(cdot_json)])
+        #     if cdot_json
+        #     else RESTDataProvider()  # Uses API server at cdot.cc
+        #     # else hgvs.dataproviders.uta.connect()
+        # )
+        # self.am = hgvs.assemblymapper.AssemblyMapper(
+        #     self.hdp,
+        #     assembly_name=self.assembly,
+        #     alt_aln_method="splign",
+        #     replace_reference=True,
+        # )
+        # self.hp = hgvs.parser.Parser()
+        # self.hn = hgvs.normalizer.Normalizer(self.hdp)
+        annotation = from_json(Path(annotation_json)) if annotation_json else {}
+        self.transcript_id = annotation[self.cds.id].get("transcript_id", "")
+        self.transcript_ac = annotation[self.cds.id].get("transcript_ac", "")
+        self.chrom_ac = annotation[self.cds.id].get("chromosome_ac", "")
+        self.protein_ac = annotation[self.cds.id].get("protein_ac", "")
+        self.annotator = HGVSMutationAnnotator(
+            assembly=self.assembly, cdot_json=cdot_json
         )
-        self.am = hgvs.assemblymapper.AssemblyMapper(
-            self.hdp,
-            assembly_name=assembly,
-            alt_aln_method="splign",
-            replace_reference=True,
-        )
-        self.hp = hgvs.parser.Parser()
-        self.hn = hgvs.normalizer.Normalizer(self.hdp)
 
     ############################################################################
     # Helper
@@ -311,26 +315,27 @@ class HGVSVariantGenerator:
         return ref, alt
 
     def _genomic_pos_to_local_0(self, g_pos_1based: int) -> int:
-        """Konvertiert 1-based chromosomale Position → 0-based Index in genomic_seq."""
+        """convert 1-based chromosomal position → 0-based index in
+        genomic_seq."""
         return g_pos_1based - self.gene_start_1
 
     def _c_pos_to_cds_0(self, c_pos_1based: int) -> int:
-        """Konvertiert 1-based c.-Position → 0-based Index in cds_seq."""
+        """convert 1-based c.-position → 0-based index in cds_seq."""
         return c_pos_1based - 1
 
     def _region_type(self, var_c) -> str:
-        """Bestimmt ob die Mutation exonisch oder intronisch ist."""
+        """determine if the mutation is exonic or intronic."""
         if var_c is None:
             return "intergenic"
         pos = var_c.posedit.pos.start
-        # Intronische Positionen haben einen Offset != 0
+        # Intronic positions have an offset != 0
         if hasattr(pos, "offset") and pos.offset != 0:
             return "intron"
         # UTR
         base = pos.base
         if base <= 0:
             return "5UTR"
-        # Prüfe ob nach Stop (c.*N)
+        # Check if after stop (c.*N)
         if hasattr(pos, "datum") and str(pos.datum) == "SEQ_STOP":
             return "3UTR"
         return "exon"
@@ -389,42 +394,110 @@ class HGVSVariantGenerator:
     #     raise ValueError(f"Unrecognized format: {mutalyzer_str}")
 
     ############################################################################
+    # Fetch ClinVar
+    ############################################################################
+
+    def vcv_to_variation_id(self, vcv_id: str) -> str:
+        return vcv_id.replace("VCV", "").lstrip("0")
+
+    def vcv_to_id(self, variation_id: str) -> str:
+        """VCV000428872 -> 428872"""
+
+        return re.sub(r"^VCV0*", "", variation_id)
+
+    # def get_spdi_variation_api(self, variation_id):
+    #     url = f"https://api.ncbi.nlm.nih.gov/variation/v0/vcv/{variation_id}"
+    #     params = {"assembly": "GRCh38"}
+    #     r = requests.get(url, params=params)
+    #     print(r.status_code)
+    #     print(r.text[:3000])
+    #     data = r.json()
+
+    #     # SPDI is directly available
+    #     spdi_list = data.get("data", {}).get("spdi", [])
+    #     for spdi in spdi_list:
+    #         print(spdi)
+    #     return spdi_list
+
+    def get_spdi_from_clinvar(
+        self, variation_id: str, assembly: str = "GRCh38"
+    ) -> list[str]:
+        vid = self.vcv_to_id(variation_id)
+        url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        url = f"https://www.ncbi.nlm.nih.gov/clinvar/variation/{vid}/?redir=vcv&variant={variation_id}"
+        params = {
+            # "db": "clinvar",
+            # "id": vid,
+            # "rettype": "clinvarset",  # "vcv",
+        }
+        r = requests.get(url, params=params)
+        r.raise_for_status()
+        print("url", r.url)
+        print(r.text)
+        root = ET.fromstring(r.text)
+        spdis = []
+        for loc in root.iter("SequenceLocation"):
+            if loc.get("Assembly") != assembly:
+                continue
+            accession = loc.get("Accession")
+            pos_vcf = loc.get("positionVCF")  # 1-based
+            ref = loc.get("referenceAlleleVCF")
+            alt = loc.get("alternateAlleleVCF")
+
+            if accession and pos_vcf and ref and alt:
+                # SPDI is 0-based, VCF is 1-based
+                spdi = f"{accession}:{int(pos_vcf) - 1}:{ref}:{alt}"
+                spdis.append(spdi)
+
+        return spdis
+
+    ############################################################################
     # HGVS translation
     ############################################################################
 
-    def from_hgvs(
+    def from_vcv_hgvs(
         self,
-        hgvs_or_mutalyzer_c_str: str,
+        vcv_accession: str,
+        hgvs: str,
         genomic_range: tuple[int, int] | None = None,
     ) -> Mutation:
         """Erzeugt eine Mutation-Instanz aus einem c.-HGVS-String."""
-        # hgvs_c_str, transcript, _ = self.mutalyzer_to_hgvs(
-        #     hgvs_or_mutalyzer_c_str, translate_to="c"
-        # )
-        print("input", hgvs_or_mutalyzer_c_str)
-        normalized = Mutalyzer.normalize(hgvs_or_mutalyzer_c_str)
-        print("mutalyzer", normalized)
-        hgvs_compliant = Mutalyzer.mutalyzer_to_hgvs(normalized)
-        print("compliant", hgvs_compliant)
-        try:
-            print("trying normalized", normalized["hgvs_g"])
-            var_g = self.hp.parse_hgvs_variant(normalized["hgvs_g"])
-        except Exception as e:
-            print(f"Error parsing HGVS g variant: {e}")
-            try:
-                print("trying compliant", hgvs_compliant["hgvs_g"])
-                var_g = (
-                    self.hp.parse_hgvs_variant(hgvs_compliant["hgvs_g"])
-                    if hgvs_compliant["hgvs_g"]
-                    else None
-                )
-            except Exception as e:
-                print(f"Error parsing HGVS g variant: {e}")
-                raise
+        spdi = self.get_spdi_from_clinvar(vcv_accession)
+        if not spdi:
+            raise ValueError(f"No SPDI found for {vcv_accession}")
+        return self.from_hgvs(
+            spdi[0], genomic_range=genomic_range
+        )  # Assuming the SPDI can be directly parsed as HGVS
+
+    def from_vcv(
+        self,
+        vcv_accession: str,
+        genomic_range: tuple[int, int] | None = None,
+        hgvs: str | None = None,
+    ) -> Mutation:
+        """Erzeugt eine Mutation-Instanz aus einem c.-HGVS-String."""
+        spdi = self.get_spdi_from_clinvar(vcv_accession)
+        if not spdi:
+            raise ValueError(f"No SPDI found for {vcv_accession}")
+        return self.from_spdi(
+            spdi[0],
+            genomic_range=genomic_range,
+            var_id=vcv_accession,
+            hgvs=hgvs,
+        )
+
+    def from_spdi(
+        self,
+        spdi_str: str,
+        genomic_range: tuple[int, int] | None = None,
+        var_id: str | None = None,
+        hgvs: str | None = None,
+    ) -> Mutation:
+        """Erzeugt eine Mutation-Instanz aus einem c.-HGVS-String."""
+        var_g = self.annotator.spdi_to_var_g(spdi_str)
         if var_g is None:
-            raise ValueError(
-                f"Could not parse genomic HGVS for {hgvs_or_mutalyzer_c_str}"
-            )
+            raise ValueError(f"Could not parse genomic HGVS for {spdi_str}")
+        print("var_g", var_g, dir(var_g))
         # print("var_g", var_g, dir(var_g))
         # if (
         #     hasattr(var_g, "posedit")
@@ -432,17 +505,133 @@ class HGVSVariantGenerator:
         #     and hasattr(var_g.posedit, "pos")
         # ):
         #     print("post", var_g.posedit.pos, dir(var_g.posedit.pos))
+        var_c = (
+            self.annotator.g_to_c(var_g, self.transcript_ac)
+            or self.annotator.hp.parse_hgvs_variant(hgvs)
+            if hgvs
+            else None
+        )
+        var_p = self.annotator.c_to_p(var_c, self.protein_ac)
+        # try:
+        #     # print("var_c", var_c, dir(var_c))
+        # except hgvs.exceptions.HGVSParseError as e:
+        #     print(f"Error parsing HGVS c variant: {e}")
+        #     raise
+        # if var_c:
+        # try:
+        #     var_r = self.annotator.c_to_r(var_c)  # , self.protein_ac)
+        # except Exception as e:
+        #     print(f"Error parsing HGVS r variant: {e}")
+        #     var_r = None
+        # try:
+        # except Exception as e:
+        #     print(f"Error parsing HGVS p variant: {e}")
+        #     var_p = None
+        return self._build_mutation(
+            var_g=var_g,
+            var_c=var_c,
+            var_p=var_p,
+            genomic_range=genomic_range,
+            var_id=var_id,
+            # normalized=None,
+            # var_r=var_r,
+        )
+
+    # def from_hgvs_g(self, hgvs_or_mutalyzer_g_str: str) -> Mutation:
+    #     """Erzeugt eine Mutation-Instanz aus einem g.-HGVS-String."""
+    #     hgvs_g_str, _, _ = self.mutalyzer_to_hgvs(
+    #         hgvs_or_mutalyzer_g_str, translate_to="g"
+    #     )
+    #     var_g = self.hp.parse_hgvs_variant(hgvs_g_str)
+    #     var_c = self._safe_g_to_c(var_g)
+    #     var_p = self._safe_c_to_p(var_c) if var_c else None
+    #     return self._build_mutation(
+    #         var_c=var_c,
+    #         var_g=var_g,
+    #         var_p=var_p,
+    #         hgvs_g_str=hgvs_g_str,
+    #     )
+
+    def from_hgvs(
+        self,
+        hgvs_or_mutalyzer_c_str: str,
+        genomic_range: tuple[int, int] | None = None,
+        var_id: str | None = None,
+    ) -> Mutation:
+        """Erzeugt eine Mutation-Instanz aus einem c.-HGVS-String."""
         try:
-            var_c = self.hp.parse_hgvs_variant(normalized["hgvs_c"])
-            print("var_c", var_c, dir(var_c))
+            var_c = self.annotator.hp.parse_hgvs_variant(
+                hgvs_or_mutalyzer_c_str
+            )
         except hgvs.exceptions.HGVSParseError as e:
-            print(f"Error parsing HGVS c variant: {e}")
-        try:
-            var_c = self.hp.parse_hgvs_variant(hgvs_compliant["hgvs_c"])
-            print("var_c compliant", var_c, dir(var_c))
-        except Exception as e:
-            print(f"Error parsing HGVS c variant: {e}")
+            print(
+                f"Error parsing HGVS g variant: {e}, input: {hgvs_or_mutalyzer_c_str}"
+            )
             raise
+        var_g = self.annotator.c_to_g(var_c)
+        if var_g is None:
+            raise ValueError(
+                f"Could not parse genomic HGVS for {hgvs_or_mutalyzer_c_str}"
+            )
+        print(hgvs_or_mutalyzer_c_str, var_g, var_c)
+        var_p = self.annotator.c_to_p(
+            var_c, self.protein_ac
+        )  # , self.protein_ac)
+        # hgvs_c_str, transcript, _ = self.mutalyzer_to_hgvs(
+        #     hgvs_or_mutalyzer_c_str, translate_to="c"
+        # )
+        # normalized = Mutalyzer.normalize(hgvs_or_mutalyzer_c_str)
+        # print("mutalyzer", normalized)
+        # hgvs_compliant = Mutalyzer.mutalyzer_to_hgvs(normalized)
+        # print("compliant", hgvs_compliant)
+        # var_c = None
+        # var_g = None
+        # try:
+        #     # print("trying normalized", normalized["hgvs_g"])
+        #     var_g = self.annotator.hp.parse_hgvs_variant(normalized["hgvs_g"])
+        # except Exception:
+        #     print(
+        #         "Input HGVS/Mutalyzer string:",
+        #         hgvs_or_mutalyzer_c_str,
+        #         normalized["hgvs_g"],
+        #     )
+        # print(f"Error parsing HGVS g variant: {e}")
+
+        #     try:
+        #         # print("trying compliant", hgvs_compliant["hgvs_g"])
+        #         var_c = self.annotator.hp.parse_hgvs_variant(
+        #             hgvs_or_mutalyzer_c_str
+        #         )
+        #         var_g = self.annotator.am.c_to_g(var_c)
+        #     except Exception as e:
+        #         print(
+        #             f"Error parsing HGVS g variant: {e}, input: {hgvs_compliant['hgvs_g']}"
+        #         )
+        #         # raise
+        # if var_g is None:
+        #     raise ValueError(
+        #         f"Could not parse genomic HGVS for {hgvs_or_mutalyzer_c_str}"
+        #     )
+        # print("var_g", var_g, dir(var_g))
+        # if (
+        #     hasattr(var_g, "posedit")
+        #     and var_g.posedit
+        #     and hasattr(var_g.posedit, "pos")
+        # ):
+        #     print("post", var_g.posedit.pos, dir(var_g.posedit.pos))
+        # try:
+        #     var_c = self.annotator.hp.parse_hgvs_variant(normalized["hgvs_c"])
+        #     # print("var_c", var_c, dir(var_c))
+        # except hgvs.exceptions.HGVSParseError as e:
+        #     print(f"Error parsing HGVS c variant: {e}")
+        # try:
+        #     var_c = self.annotator.hp.parse_hgvs_variant(
+        #         hgvs_compliant["hgvs_c"]
+        #     )
+        #     # print("var_c compliant", var_c, dir(var_c))
+        # except Exception as e:
+        #     print(f"Error parsing HGVS c variant: {e}")
+        #     raise
         # var_p = (
         #     self.hp.parse_hgvs_variant(hgvs_compliant["hgvs_p"])
         #     if hgvs_compliant["hgvs_p"]
@@ -455,14 +644,16 @@ class HGVSVariantGenerator:
         # )
         # var_g = self.am.c_to_g(var_c)  # , alt_ac=transcript)
         # var_p = self._safe_c_to_p(var_c)
+        # var_r = None
         return self._build_mutation(
-            var_c=var_c,
             var_g=var_g,
-            # var_p=var_p,
-            # var_r=var_r,
-            normalized=normalized,
-            # hgvs_compliant=hgvs_compliant,
+            var_c=var_c,
+            var_p=var_p,
             genomic_range=genomic_range,
+            var_id=var_id,
+            # var_r=var_r,
+            # normalized=normalized,
+            # hgvs_compliant=hgvs_compliant,
         )
 
     # def from_hgvs_g(self, hgvs_or_mutalyzer_g_str: str) -> Mutation:
@@ -510,24 +701,45 @@ class HGVSVariantGenerator:
         )
         flanks = genomic_range or self.genomic_flanks or flanks_around_position
         # priority: genomic_range > default flanks > local_cut > no cut
+        # print(
+        #     "flanks:",
+        #     flanks,
+        #     "genomic_range:",
+        #     genomic_range,
+        #     "self.genomic_flanks:",
+        #     self.genomic_flanks,
+        #     "flanks_around_position:",
+        #     flanks_around_position,
+        # )
         if flanks:
-            flank_left, flank_right = flanks
-            frag_start = self._genomic_pos_to_local_0(flank_left)
+            flank_left = min(flanks)
+            flank_right = max(flanks)
+            frag_start = self._genomic_pos_to_local_0(
+                flank_left
+            )  # do not assume this is the smaller index
             frag_end = self._genomic_pos_to_local_0(flank_right)
+            # print(
+            #     "flank coordinates",
+            #     flank_left,
+            #     flank_right,
+            #     "frag coordinates",
+            #     frag_start,
+            #     frag_end,
+            # )
             local_pos_0 = self._genomic_pos_to_local_0(genomic_pos_1)
             frag_start, frag_end = min(frag_start, frag_end), max(
                 frag_start, frag_end
             )
-            print(
-                flank_left,
-                flank_right,
-                frag_start,
-                frag_end,
-                local_pos_0,
-                genomic_pos_1,
-            )
-            fragment = self.genomic.seq[frag_start:frag_end]
-            print("Fragment", fragment)
+            # print(
+            #     flank_left,
+            #     flank_right,
+            #     frag_start,
+            #     frag_end,
+            #     local_pos_0,
+            #     genomic_pos_1,
+            # )
+            fragment = self.genomic.seq[frag_start : frag_end + 1]
+            # print("Fragment", fragment, str(Seq(fragment).reverse_complement()))
             local_in_frag = local_pos_0 - frag_start
         else:
             fragment = self.genomic.seq
@@ -548,7 +760,7 @@ class HGVSVariantGenerator:
         ----------
         ref_region  : the fetched reference sequence (with flanking)
         variant_pos : 0-based start of the variant within ref_region
-        ref_len     : length of the reference allele (end = variant_pos + ref_len)
+        ref_len     : length of the ref allele (end = variant_pos + ref_len)
         edit        : any hgvs.edit.Edit subclass instance
 
         Supported edit types:
@@ -563,38 +775,38 @@ class HGVSVariantGenerator:
         before = ref_region[:variant_pos]
         ref_seq = ref_region[variant_pos : variant_pos + ref_len]
         after = ref_region[variant_pos + ref_len :]
-        print(
-            variant_pos,
-            ref_len,
-            ref_seq,
-            before,
-            after,
-            Seq(before).reverse_complement(),
-            Seq(after).reverse_complement(),
-        )
+        # print(
+        #     variant_pos,
+        #     ref_len,
+        #     ref_seq,
+        #     before,
+        #     after,
+        #     Seq(before).reverse_complement(),
+        #     Seq(after).reverse_complement(),
+        # )
         match edit:
             case hgvs.edit.NARefAlt():
                 # SNV, Del, Ins, Delins — standard ref→alt substitution
                 # DelIns: both ref and alt present, replaces ref_len with alt
                 alt = edit.alt or ""
-                print("ALT", alt)
+                # print("ALT", alt)
                 return before + alt + after
 
             case hgvs.edit.Dup():
                 # g.100_102dup → duplicates the ref_seq in tandem
-                print("DUP of", ref_seq)
+                # print("DUP of", ref_seq)
                 return before + ref_seq + ref_seq + after
 
             case hgvs.edit.Inv():
                 # g.100_102inv → reverse complement of ref_seq
                 inv_seq = str(Seq(ref_seq).reverse_complement())
-                print("INV of", ref_seq, "->", inv_seq)
+                # print("INV of", ref_seq, "->", inv_seq)
                 return before + inv_seq + after
 
             case hgvs.edit.Repeat():
                 # g.100_102[4] → repeat ref_seq N times
                 count = edit.seq.ref_n  # the repeat count
-                print("REPEAT of", ref_seq, "->", ref_seq * count)
+                # print("REPEAT of", ref_seq, "->", ref_seq * count)
                 return before + (ref_seq * count) + after
 
             case _:
@@ -611,7 +823,7 @@ class HGVSVariantGenerator:
         if isinstance(edit, hgvs.edit.NARefAlt) and edit.ref and not edit.alt:
             return len(edit.ref)
 
-        # 2. Insertion (ins) - WICHTIG: ref_len = 0!
+        # 2. Insertion (ins) ref_len = 0!
         if isinstance(edit, hgvs.edit.NARefAlt) and not edit.ref and edit.alt:
             return 0
 
@@ -634,7 +846,7 @@ class HGVSVariantGenerator:
         self, var: SequenceVariant, hgvs: str | None
     ) -> str | None:
         try:
-            normalized_hgvs = self.hn.normalize(var) if var else hgvs
+            normalized_hgvs = self.annotator.hn.normalize(var) if var else hgvs
         except Exception:
             normalized_hgvs = hgvs
         return normalized_hgvs
@@ -644,7 +856,7 @@ class HGVSVariantGenerator:
         gvar: VariantG,
         genomic_range: tuple[int, int] | None = None,
     ) -> tuple[str, str, int]:
-        gvar.print_hgvs_details()
+        # gvar.print_hgvs_details()
         ref_len = gvar.ref_len  # self._ref_len_from_variant(var)
         ref_region, local_variant_pos_0 = self._get_local_reference(
             gvar.genomic_start_1,
@@ -662,14 +874,14 @@ class HGVSVariantGenerator:
         #     # Alle anderen: start ist die erste betroffene Base
         #     g_start_1 = pos.start.base
 
-        print(
-            "We use",
-            gvar.genomic_start_1,
-            "with",
-            gvar.edit_type,
-            "to infer the local position",
-            local_variant_pos_0,
-        )
+        # print(
+        #     "We use",
+        #     gvar.genomic_start_1,
+        #     "with",
+        #     gvar.edit_type,
+        #     "to infer the local position",
+        #     local_variant_pos_0,
+        # )
         gvar.validate_ref(ref_region, local_variant_pos_0)
         # Optional ref validation where possible
 
@@ -691,23 +903,25 @@ class HGVSVariantGenerator:
         self, var_c: SequenceVariant
     ) -> int | None:
         cds_pos_0: int | None = None
-        c_start = var_c.posedit.pos.start
-        # Nur für exonische Positionen ohne Intron-Offset
-        if not (hasattr(c_start, "offset") and c_start.offset != 0):
-            base = c_start.base
-            if 1 <= base <= len(self.cds):
-                cds_pos_0 = self._c_pos_to_cds_0(base)
+        if var_c:
+            c_start = var_c.posedit.pos.start
+            # Nur für exonische Positionen ohne Intron-Offset
+            if not (hasattr(c_start, "offset") and c_start.offset != 0):
+                base = c_start.base
+                if 1 <= base <= len(self.cds):
+                    cds_pos_0 = self._c_pos_to_cds_0(base)
         return cds_pos_0
 
     def _build_mutation(
         self,
         var_g: SequenceVariant,
         var_c: SequenceVariant | None,
-        # var_p: SequenceVariant | None,
-        # var_r: SequenceVariant | None,
-        normalized: dict[str, str | None],
-        # hgvs_compliant: dict[str, str | None],
+        var_p: SequenceVariant | None,
         genomic_range: tuple[int, int] | None = None,
+        var_id: str | None = None,
+        # var_r: SequenceVariant | None,
+        # normalized: dict[str, str | None],
+        # hgvs_compliant: dict[str, str | None],
     ) -> Mutation:
 
         # HGVS Strings
@@ -753,7 +967,7 @@ class HGVSVariantGenerator:
         # extract edit from c (if available) and determine cds_pos
         # print("strand", self.strand)
         g_start_1 = gvar.genomic_start_1
-        cds_pos_0 = self.__infer_cds_pos_0_from_var_c(var_c)
+        cds_pos_0 = self.__infer_cds_pos_0_from_var_c(var_c) if var_c else None
         # print(
         #     "aaaaa",
         #     g_ref,
@@ -786,10 +1000,10 @@ class HGVSVariantGenerator:
         # seq, mutation_pos = self._build_seq_with_flanking(
         #     local_start_0, g_ref, g_alt
         # )
-        hgvs_g = normalized.get("hgvs_g")
-        hgvs_c = normalized.get("hgvs_c")
-        hgvs_p = normalized.get("hgvs_p")
-        hgvs_r = normalized.get("hgvs_r")
+        # hgvs_g = normalized.get("hgvs_g")
+        # hgvs_c = normalized.get("hgvs_c")
+        # hgvs_p = normalized.get("hgvs_p")
+        # hgvs_r = normalized.get("hgvs_r")
 
         # hgvs_g_normalized = self._normalize_hgvs(
         #     var_g, hgvs_compliant["hgvs_g"]
@@ -803,8 +1017,11 @@ class HGVSVariantGenerator:
         # hgvs_r_normalized = self._normalize_hgvs(
         #     var_r, hgvs_compliant["hgvs_r"]
         # )
-        chrom_ac = normalized.get("chrom_ac") or ""
-        seq_id = f"{self.seq_id_prefix}_{hgvs_c or hgvs_g}"
+        hgvs_g = self.annotator.to_hgvs(var_g) if var_g else None
+        hgvs_c = self.annotator.to_hgvs(var_c) if var_c else None
+        hgvs_p = self.annotator.to_hgvs(var_p) if var_p else None
+        hgvs_r = self.annotator.hgvs_c_to_r(hgvs_c) if hgvs_c else None
+        seq_id = var_id or f"{hgvs_c or hgvs_g}"
         # print("before mutation", self.strand, type(seq))
         if self.strand == -1:
             mutated = str(Seq(seq).reverse_complement())
@@ -818,9 +1035,11 @@ class HGVSVariantGenerator:
             seq_id=seq_id,
             genomic=seq,
             coding=mutated,
-            genomic_id=chrom_ac,
+            genomic_id=self.genomic.id,
             chromosome=self.chromosome,
             strand=self.strand,
+            genomic_start=self.gene_start_1,
+            genomic_end=self.gene_end_1,
             region_type=region_type,
             mutation_pos=local_variant_pos_0,
             genomic_pos=g_start_1,  # 1-based
@@ -832,6 +1051,9 @@ class HGVSVariantGenerator:
             alt_codon=alt_codon,
             ref_aa=ref_aa,
             alt_aa=alt_aa,
+            chromosome_ac=self.chrom_ac or "",
+            transcript_ac=self.transcript_ac or "",
+            protein_ac=self.protein_ac or "",
             prot_pos=prot_pos,
             hgvs_g=hgvs_g,
             hgvs_c=hgvs_c,
@@ -839,149 +1061,3 @@ class HGVSVariantGenerator:
             hgvs_r=hgvs_r,
             refseq=ref_region,
         )
-
-
-############################################################################
-# ClinVar
-############################################################################
-
-
-# class ClinVarMutator:
-
-#     def __init__(self, annotator, cds_to_genomic_map):
-#         """
-#         cds_to_genomic_map: dict[int, int]
-#             maps CDS index (0-based) → genomic index (0-based)
-#         """
-#         self.annotator = annotator
-#         self.map = cds_to_genomic_map
-
-#     # --------------------------------------------------
-#     # 🧬 Parse HGVS c. string
-#     # --------------------------------------------------
-#     def parse_hgvs_c(self, hgvs: str):
-#         """
-#         Returns structured dict
-#         """
-#         hgvs = hgvs.split(":")[-1]  # remove transcript prefix
-
-#         # remove protein part
-#         hgvs = hgvs.split(" ")[0]
-
-#         # patterns
-#         patterns = {
-#             "del": r"c\.(.+)del$",
-#             "dup": r"c\.(.+)dup$",
-#             "delins": r"c\.(.+)delins([ACGT]+)",
-#             "sub": r"c\.(\d+)([ACGT])>([ACGT])",
-#         }
-
-#         for k, p in patterns.items():
-#             m = re.match(p, hgvs)
-#             if m:
-#                 return k, m.groups()
-
-#         raise ValueError(f"Unsupported HGVS: {hgvs}")
-
-#     # --------------------------------------------------
-#     # 🧬 Convert c. position → genomic
-#     # --------------------------------------------------
-#     def cds_to_genomic(self, cds_pos):
-#         """
-#         cds_pos can be:
-#         - "920"
-#         - "993+4"
-#         - "920-2"
-#         """
-#         m = re.match(r"(\d+)([+-]\d+)?", cds_pos)
-
-#         base = int(m.group(1)) - 1
-#         offset = int(m.group(2)) if m.group(2) else 0
-
-#         genomic = self.map[base] + offset
-#         return genomic
-
-#     # --------------------------------------------------
-#     # 🧬 Handle ranges
-#     # --------------------------------------------------
-#     def parse_range(self, pos_str):
-#         if "_" in pos_str:
-#             start, end = pos_str.split("_")
-#             return self.cds_to_genomic(start), self.cds_to_genomic(end)
-#         else:
-#             g = self.cds_to_genomic(pos_str)
-#             return g, g
-
-#     # --------------------------------------------------
-#     # 🧬 Apply variant
-#     # --------------------------------------------------
-#     def apply_variant(self, seq, start, end, op, alt=None):
-
-#         if op == "del":
-#             return seq[:start] + seq[end + 1 :]
-
-#         elif op == "dup":
-#             dup = seq[start : end + 1]
-#             return seq[: end + 1] + dup + seq[end + 1 :]
-
-#         elif op == "delins":
-#             return seq[:start] + alt + seq[end + 1 :]
-
-#         elif op == "sub":
-#             return seq[:start] + alt + seq[start + 1 :]
-
-#         else:
-#             raise ValueError(op)
-
-#     # --------------------------------------------------
-#     # 🚀 MAIN
-#     # --------------------------------------------------
-#     def generate_from_hgvs(
-#         self,
-#         hgvs_string,
-#         record,
-#         seq_id,
-#         genomic_id,
-#     ):
-
-#         seq = str(record.seq)
-
-#         op, groups = self.parse_hgvs_c(hgvs_string)
-
-#         if op == "sub":
-#             pos, ref, alt = groups
-#             start = self.cds_to_genomic(pos)
-#             end = start
-
-#         elif op == "del":
-#             pos = groups[0]
-#             start, end = self.parse_range(pos)
-#             alt = ""
-
-#         elif op == "dup":
-#             pos = groups[0]
-#             start, end = self.parse_range(pos)
-#             alt = None
-
-#         elif op == "delins":
-#             pos, alt = groups
-#             start, end = self.parse_range(pos)
-
-#         else:
-#             raise ValueError(op)
-
-#         mutated_seq = self.apply_variant(seq, start, end, op, alt)
-
-#         ref = seq[start : end + 1] if op != "sub" else seq[start]
-
-#         return self.annotator.annotate(
-#             seq_id=seq_id,
-#             genomic_id=genomic_id,
-#             mutation_pos=start,
-#             genomic_pos=start,
-#             region_type="exon",  # TODO: map properly
-#             ref=ref,
-#             alt=alt if alt else "",
-#             mut_type=op.upper(),
-#             seq=mutated_seq,
-#         )

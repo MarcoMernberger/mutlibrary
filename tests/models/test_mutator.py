@@ -6,10 +6,21 @@ from Bio.Data import CodonTable  # type: ignore[import]
 from Bio.SeqIO import SeqRecord  # type: ignore[import]
 from pandas import DataFrame  # type: ignore[import]
 
+from mutlibrary.models.annotator import (  # type: ignore[import]
+    # Mutalyzer,
+    HGVSMutationAnnotator,
+    MutationAnnotator,
+)
 from mutlibrary.models.mutator import (  # type: ignore[import]
     MultiSeqMutatorHGVS,
     MutatorHGVS,
 )
+
+
+class MockAnnotator(MutationAnnotator):
+    def annotate(self, mutation):
+        return mutation
+
 
 ########################################################################################
 # Fixtures
@@ -25,13 +36,28 @@ def records(test_fasta):
 @pytest.fixture
 def regions(test_region, records):
     major = MutatorHGVS()
-    return major.region_definitions(test_region, records)
+    return major.region_definitions(
+        test_region,
+        records,
+        exclude=[
+            "TP53-201_cds_protein_coding",
+            "17",
+            "Test_CDS",
+            "Test_genomic",
+        ],
+    )
 
 
 @pytest.fixture
-def annotations(test_annotation, records):
+def annotations(annotation, records):
     major = MutatorHGVS()
-    return major.record_annotations(test_annotation, records)
+    return major.record_annotations(annotation, records)
+
+
+@pytest.fixture
+def real_annotations(annotation, real_records):
+    major = MutatorHGVS()
+    return major.record_annotations(annotation, real_records)
 
 
 @pytest.fixture
@@ -52,8 +78,30 @@ def genomic(records):
 @pytest.fixture
 def mutator(sample, regions, cds, genomic, annotations):
     return MultiSeqMutatorHGVS(
-        sample, regions[sample.id], genomic, cds, annotations[sample.id]
+        sample,
+        genomic,
+        cds,
+        regions[sample.id],
+        annotations,
+        annotator=MockAnnotator(),
     )
+
+
+@pytest.fixture
+def real_mutator(real_sample, real_regions, cds, genomic, annotations):
+    return MultiSeqMutatorHGVS(
+        real_sample,
+        genomic,
+        cds,
+        real_regions[real_sample.id],
+        annotations,
+        annotator=HGVSMutationAnnotator(),
+    )
+
+
+@pytest.fixture
+def real_mutations(real_mutator):
+    return real_mutator.collect_mutations()
 
 
 @pytest.fixture
@@ -92,34 +140,71 @@ def test_records(test_fasta):
 def test_regions(test_fasta, test_region):
     major = MutatorHGVS()
     records = major.read_records(test_fasta)
-    regions = major.region_definitions(test_region, records)
+    regions = major.region_definitions(
+        test_region,
+        records,
+        ["TP53-201_cds_protein_coding", "17", "Test_CDS", "Test_genomic"],
+    )
     assert isinstance(regions, dict)
     for record_name in regions:
         region_list = regions[record_name]
-        assert isinstance(region_list, list)
+        assert isinstance(
+            region_list, list
+        ), f"Expected list of regions for {record_name}, was {type(region_list)}"
         for item in region_list:
             assert "name" in item
             assert "type" in item
             assert "start" in item
             assert "end" in item
             assert "length" in item
+            assert "mutations" in item
 
 
-def test_annotation(annotations, regions):
-    assert isinstance(annotations, dict)
-    for record_name in regions:
+def test_annotation(real_annotations, real_regions):
+    assert isinstance(real_annotations, dict)
+    for record_name in real_regions:
         assert (
-            record_name in annotations
+            record_name in real_annotations
         ), f"Missing annotation for {record_name}"
-    annotation_for_sequence = annotations["Test_Exon_Truncation"]
-    assert isinstance(annotation_for_sequence, dict)
-    assert "genomic_start" in annotation_for_sequence
-    assert annotation_for_sequence["chromosome"] == "17"
-    assert annotation_for_sequence["strand"] == "+"
-    assert annotation_for_sequence["genomic_start"] == 10000
-    assert annotation_for_sequence["assembly"] == "GRCh38"
-    assert annotation_for_sequence["transcript_ensembl_id"] == "ENST00000269305"
-    assert annotation_for_sequence["genomic_id"] == "NM_000546.6"
+    annotation_for_gene = real_annotations["TP53-201_cds_protein_coding"]
+    annotation_for_cds = real_annotations["TP53-201_cds_protein_coding"]
+    annotations_for_sample = real_annotations["TP53-201_Ex9_realtest"]
+    assert isinstance(annotation_for_cds, dict)
+    assert isinstance(annotations_for_sample, dict)
+    assert isinstance(annotation_for_gene, dict)
+    assert "transcript_id" in annotation_for_cds
+    assert "transcript_ac" in annotation_for_cds
+    assert "chromosome_ac" in annotation_for_gene
+    assert "protein_ac" in annotation_for_cds
+    assert annotation_for_cds["transcript_id"] == "ENST00000269305"
+    assert annotation_for_cds["transcript_ac"] == "NM_000546.6"
+    assert annotation_for_gene["chromosome_ac"] == "NC_000017.11"
+    assert annotation_for_cds["protein_ac"] == "NP_000537.3"
+
+
+def test_mutalyzer_on_generated_sequences(real_mutations, real_mutator):
+    # assert isinstance(
+    #     real_mutator.annotator, Mutalyzer  # HGVSMutationAnnotator
+    # ), f"annotator should be HGVSMutationAnnotator, was {type(real_mutator.annotator)}"
+    print("anno is", type(real_mutator.annotator))
+    for mutation in real_mutations:
+        print(
+            mutation.hgvs_g,
+            mutation.hgvs_c,
+            mutation.hgvs_p,
+            mutation.hgvs_r,
+            mutation.genomic,
+        )
+        assert mutation.hgvs_g, f"Missing HGVS g for {mutation}"
+        if mutation.region_type == "exon":
+            assert mutation.hgvs_c, f"Missing HGVS c for {mutation}"
+            assert mutation.hgvs_p is not None, f"Missing HGVS p for {mutation}"
+        assert mutation.coding, f"Missing coding sequence for {mutation}"
+        # assert mutation.genomic, f"Missing genomic sequence for {mutation}"
+        # assert (
+        #     mutation.protein is not None
+        # ), f"Missing protein sequence for {mutation}"
+    raise ValueError("Stop here to check the printed mutations")
 
 
 def test_generate_mutations(mutations):
@@ -152,8 +237,10 @@ def test_write_mutations(tmp_path, mutator, sample):
     assert len(lines) > 1, "Expected header plus at least one mutation row"
 
 
-def test_insertions(mutations, annotations, sample, regions, mutator):
-    genomic_start = annotations[sample.id]["genomic_start"]
+def test_insertions(mutations, sample, regions, mutator):
+    genomic_start = (
+        mutator.genomic_start
+    )  # annotations[sample.id]["genomic_start"]
     bases = ["A", "C", "G", "T"]
 
     # ---- Filter insertions ----
@@ -172,8 +259,8 @@ def test_insertions(mutations, annotations, sample, regions, mutator):
     # ---- All insertion sequences exist ----
     expected_insertions = {
         "".join(p)
-        for l in [1, 2, 3]
-        for p in itertools.product(bases, repeat=l)
+        for ll in [1, 2, 3]
+        for p in itertools.product(bases, repeat=ll)
     }
 
     observed_insertions = set(insertions["alt"].unique())
@@ -195,7 +282,7 @@ def test_insertions(mutations, annotations, sample, regions, mutator):
     for _, row in insertions.iterrows():
         pos = row["mutation_pos"]
         alt = row["alt"]
-        seq = row["seq"]
+        seq = row["coding"]
 
         assert (
             seq[pos : pos + len(alt)] == alt
@@ -243,8 +330,8 @@ def test_insertions(mutations, annotations, sample, regions, mutator):
 #     assert len(constant_regions) == 0, "Mutations found in constant regions"
 
 
-def test_deletions(mutations, annotations, sample):
-    genomic_start = annotations[sample.id]["genomic_start"]
+def test_deletions(mutations, sample, mutator):
+    genomic_start = mutator.genomic_start
 
     # ---- Filter deletions ----
     deletions = mutations[mutations["mutation_type"].str.startswith("DEL")]
@@ -294,7 +381,7 @@ def test_deletions(mutations, annotations, sample):
     for _, row in deletions.iterrows():
         pos = row["mutation_pos"]
         ref = row["ref"]
-        seq = row["seq"]
+        seq = row["coding"]
         # deleted segment must NOT be present anymore
         seq_stripped = sample.seq[:pos] + sample.seq[pos + len(ref) :]
         deleted = sample.seq[pos : pos + len(ref)]
@@ -306,7 +393,7 @@ def test_deletions(mutations, annotations, sample):
             deleted == ref
         ), f"Deleted sequence should be {ref}, was {deleted}"
         # ensure sequence length consistency
-        assert len(seq) == len(mutations["seq"].iloc[0]) - len(
+        assert len(seq) == len(mutations["coding"].iloc[0]) - len(
             ref
         ), f"Length mismatch after deletion {ref}"
 
@@ -316,8 +403,8 @@ def test_deletions(mutations, annotations, sample):
         ), f"Genomic position mismatch for {row}"
 
 
-def test_snps(mutations, annotations, sample):
-    genomic_start = annotations[sample.id]["genomic_start"]
+def test_snps(mutations, mutator):
+    genomic_start = mutator.genomic_start
     bases = ["A", "C", "G", "T"]
 
     # ---- Filter SNPs ----
@@ -346,7 +433,7 @@ def test_snps(mutations, annotations, sample):
         pos = row["mutation_pos"]
         ref = row["ref"]
         alt = row["alt"]
-        seq = row["seq"]
+        seq = row["coding"]
 
         assert ref != alt, f"Ref and alt identical in {row}"
 
@@ -357,35 +444,35 @@ def test_snps(mutations, annotations, sample):
         ), f"Genomic position mismatch for {row}"
 
 
-def test_amino_acid_mutations(mutations, annotations, sample):
-    genomic_start = annotations[sample.id]["genomic_start"]
+def test_amino_acid_mutations(mutations, mutator, sample):
+    genomic_start = mutator.genomic_start
 
     # ---- Filter AA mutations ----
     aa = mutations[mutations["mutation_type"].isin(["missense", "nonsense"])]
     # ---- Expected structure ----
     # (This assumes ONLY exon region is tested)
-    expected_atg = {
-        "ATA": "I",
-        "AAG": "K",
-        "AAC": "N",
-        "AGC": "S",
-        "ACG": "T",
-        "AGG": "R",
-    }
-    expected_taa = {
-        "GCA": "A",
-        "GAA": "E",
-        "GGA": "G",
-        "ATA": "I",
-        "AAA": "K",
-        "TTA": "L",
-        "CCA": "P",
-        "CAA": "Q",
-        "AGA": "R",
-        "TCA": "S",
-        "ACA": "T",
-        "GTA": "V",
-    }
+    # expected_atg = {
+    #     "ATA": "I",
+    #     "AAG": "K",
+    #     "AAC": "N",
+    #     "AGC": "S",
+    #     "ACG": "T",
+    #     "AGG": "R",
+    # }
+    # expected_taa = {
+    #     "GCA": "A",
+    #     "GAA": "E",
+    #     "GGA": "G",
+    #     "ATA": "I",
+    #     "AAA": "K",
+    #     "TTA": "L",
+    #     "CCA": "P",
+    #     "CAA": "Q",
+    #     "AGA": "R",
+    #     "TCA": "S",
+    #     "ACA": "T",
+    #     "GTA": "V",
+    # }
     aa.to_csv("test_aa.tsv", sep="\t")
 
     mutable_full_codons = 2 * 20
@@ -444,7 +531,7 @@ def test_amino_acid_mutations(mutations, annotations, sample):
                     amino_acid in group["alt_aa"].unique()
                 ), f"{amino_acid} codon expected at pos {codon_pos}"
 
-    for seq in aa["seq"].unique():
+    for seq in aa["coding"].unique():
         assert (
             seq[:10] == sample.seq[:10]
         ), f"First 10 bases should be unchanged in {seq}"
@@ -468,11 +555,9 @@ def test_all_mutations_semantic(mutations):
         "DEL_1",
         "DEL_2",
         "DEL_3",
-        # "DEL_fs",
         "INS_1",
         "INS_2",
         "INS_3",
-        # "INS_fs",
         "missense",
         "nonsense",
     }
@@ -487,5 +572,5 @@ def test_all_mutations_semantic(mutations):
 def test_deduplication(mutations, mutator):
     mutations.to_csv("test.tsv", sep="\t")
     assert mutations.shape[0] == 1939
-    dedup = mutator.consolidate(mutations)
+    dedup = mutator.deduplicate(mutations)
     assert dedup.shape[0] == 1471

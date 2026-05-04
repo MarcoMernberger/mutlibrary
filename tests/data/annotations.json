@@ -1,10 +1,32 @@
 {
+  "17": {
+    "chromosome_ac": "NC_000017.11"
+  },
+  "TP53-201_cds_protein_coding": {
+    "chromosome_ac": "NC_000017.11",
+    "transcript_id": "ENST00000269305",
+    "transcript_ac": "NM_000546.6",
+    "protein_ac": "NP_000537.3"
+  },
+  "TP53-201_Ex9_realtest": {
+    "chromosome_ac": "NC_000017.11",
+    "transcript_id": "ENST00000269305",
+    "transcript_ac": "NM_000546.6",
+    "protein_ac": "NP_000537.3"
+  },
+  "Test_genomic": {
+    "chromosome_ac": "NC_000017.11"
+  }, 
+  "Test_CDS": {
+    "chromosome_ac": "NC_000017.11",
+    "transcript_id": "ENST00000269305",
+    "transcript_ac": "NM_000546.6",
+    "protein_ac": "NP_000537.3"
+  },
   "Test_Exon_Truncation": {
-    "chromosome": "17",
-    "strand": "+",
-    "genomic_start": 10000,
-    "assembly": "GRCh38",
-    "transcript_ensembl_id": "ENST00000269305",
-    "genomic_id": "NM_000546.6"
+    "chromosome_ac": "NC_000017.11",
+    "transcript_id": "ENST00000269305",
+    "transcript_ac": "NM_000546.6",
+    "protein_ac": "NP_000537.3"
   }
 }

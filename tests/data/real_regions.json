@@ -1,0 +1,36 @@
+{
+  "TP53-201_Ex9_realtest": [
+    {
+      "name": "intron_const",
+      "length": 27,
+      "type": "intron",
+      "start": 0,
+      "end": 27,
+      "mutations": []
+    },
+    {
+      "name": "exon_mut",
+      "type": "exon",
+      "length": 6,
+      "start": 27,
+      "end": 33,
+      "mutations": ["SNP", "DEL", "INS", "AA"]
+    },
+    {
+      "name": "exon_const",
+      "type": "exon",
+      "start": 33,
+      "end": 101,
+      "length": 68,
+      "mutations": []
+    },
+    {
+      "name": "intron_downstream_const",
+      "type": "intron",
+      "start": 101,
+      "end": 126,
+      "length": 25,
+      "mutations": []
+    }
+  ]
+}
