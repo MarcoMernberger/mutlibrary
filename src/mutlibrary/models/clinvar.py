@@ -104,7 +104,7 @@ class VariantG:
     def genomic_start_1(self) -> int:
         g_start_1 = self.start
         if self.edit_type == "ins":
-            g_start_1 = self.end if self.end else g_start_1 + 1
+            g_start_1 = self.end if self.end else g_start_1
         return g_start_1
 
     @cached_property
@@ -249,6 +249,11 @@ class HGVSVariantGenerator:
             self.genomic.seq = self.genomic.seq.reverse_complement()
         self.cds = cds
         self.genomic_flanks = genomic_flanks
+        if self.genomic_flanks:
+            print(
+                "Check your coordinates with Ensembl Genome Browser! Genomic flanks are set to",
+                self.genomic_flanks,
+            )
         # self.transcript_ac = transcript_ac
         # self.chrom_ac = chrom_ac
         self.flanking = flanking

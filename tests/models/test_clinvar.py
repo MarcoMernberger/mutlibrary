@@ -22,10 +22,10 @@ def hgvs_generator(real_cds, real_genomic, annotation):
 def variants(hgvs_generator, clinvar_cases):
     variants = {}
     for _, row in clinvar_cases.iterrows():
+        genomic_start = row["genomic_start"]
+        genomic_end = row["genomic_end"]
         hgvs_c = row["corrected_hgvs_c"]
-        variant = hgvs_generator.from_hgvs(
-            hgvs_c, (row["genomic_start"], row["genomic_end"])
-        )
+        variant = hgvs_generator.from_hgvs(hgvs_c, (genomic_start, genomic_end))
         variants[hgvs_c] = variant
     return variants
 
