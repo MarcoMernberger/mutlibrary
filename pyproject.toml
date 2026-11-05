@@ -23,6 +23,8 @@ dependencies = [
     "gseapy>=1.0.0",
     "kaleido",
     "panel>=0.14.0",
+    "cdot>=0.2.21",
+    "hgvs",
 ]
 
 [project.optional-dependencies]
